@@ -1,0 +1,54 @@
+# YAAT Sidecar Configuration Example
+# Copy this file to yaat.yaml and configure for your environment
+
+# Your YAAT organization API key (required)
+# Get this from your YAAT dashboard
+api_key: "yaat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+# Service name (required)
+# This identifies your service in the YAAT dashboard
+service_name: "api-server"
+
+# Environment (optional, default: production)
+# e.g., production, staging, development
+environment: "production"
+
+# HTTP Proxy Configuration
+proxy:
+  # Enable HTTP traffic monitoring
+  enabled: true
+
+  # Port for sidecar to listen on
+  listen_port: 19000
+
+  # Your application's actual port
+  # Sidecar will forward all traffic here
+  upstream_url: "http://127.0.0.1:8000"
+
+# Log File Monitoring
+# Add multiple log files to monitor
+logs:
+  # Django application logs
+  - path: "/var/log/myapp/app.log"
+    format: "django"  # django, nginx, or json
+
+  # Nginx access logs
+  - path: "/var/log/nginx/access.log"
+    format: "nginx"
+
+  # Add more log files as needed
+  # - path: "/var/log/myapp/errors.log"
+  #   format: "json"
+
+# Event buffering configuration
+# Buffer size (number of events)
+buffer_size: 1000
+
+# How often to flush events to YAAT API
+# Format: 10s, 1m, 30s, etc.
+flush_interval: "10s"
+
+# YAAT API endpoint (required)
+# Production: https://api.yaat.io/v1/ingest
+# Staging: https://staging-api.yaat.io/v1/ingest
+api_endpoint: "https://api.yaat.io/v1/ingest"

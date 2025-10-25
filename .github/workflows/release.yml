@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Run tests
+        run: go test -v ./...
+
+  build:
+    name: Build Binaries
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          # Linux
+          - goos: linux
+            goarch: amd64
+            output: yaat-sidecar-linux-amd64
+          - goos: linux
+            goarch: arm64
+            output: yaat-sidecar-linux-arm64
+
+          # macOS
+          - goos: darwin
+            goarch: amd64
+            output: yaat-sidecar-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            output: yaat-sidecar-darwin-arm64
+
+          # Windows
+          - goos: windows
+            goarch: amd64
+            output: yaat-sidecar-windows-amd64.exe
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21'
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -ldflags="-w -s -X main.version=${{ github.ref_name }}" -o ${{ matrix.output }} ./cmd
+
+      - name: Create tarball (non-Windows)
+        if: matrix.goos != 'windows'
+        run: |
+          tar -czf ${{ matrix.output }}.tar.gz ${{ matrix.output }} yaat.yaml.example README.md
+          sha256sum ${{ matrix.output }}.tar.gz > ${{ matrix.output }}.tar.gz.sha256
+
+      - name: Create zip (Windows)
+        if: matrix.goos == 'windows'
+        run: |
+          zip ${{ matrix.output }}.zip ${{ matrix.output }} yaat.yaml.example README.md
+          sha256sum ${{ matrix.output }}.zip > ${{ matrix.output }}.zip.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output }}
+          path: |
+            ${{ matrix.output }}*
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
+            artifacts/**/*.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
