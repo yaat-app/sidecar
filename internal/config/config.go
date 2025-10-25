@@ -81,3 +81,55 @@ func LoadConfig(path string) (*Config, error) {
 
 	return &cfg, nil
 }
+
+// CreateSampleConfig creates a sample configuration file
+func CreateSampleConfig(path string) error {
+	sampleConfig := `# YAAT Sidecar Configuration
+# For more information, visit: https://docs.yaat.io
+
+# Your YAAT organization API key (required)
+# Get this from: https://yaat.io → Settings → API Keys
+api_key: "yaat_your_api_key_here"
+
+# Service name (required)
+# This identifies your service in the YAAT dashboard
+service_name: "my-service"
+
+# Environment (optional, default: production)
+# Examples: production, staging, development
+environment: "production"
+
+# HTTP Proxy Configuration (optional)
+# Monitor HTTP traffic by proxying requests to your application
+proxy:
+  enabled: false
+  listen_port: 19000          # Port for sidecar to listen on
+  upstream_url: "http://127.0.0.1:8000"  # Your application's URL
+
+# Log File Monitoring (optional)
+# Monitor multiple log files with different formats
+logs:
+  # Example: Django application logs
+  - path: "/var/log/myapp/app.log"
+    format: "django"  # Options: django, nginx, json
+
+  # Example: Nginx access logs
+  # - path: "/var/log/nginx/access.log"
+  #   format: "nginx"
+
+  # Example: JSON logs
+  # - path: "/var/log/myapp/events.json"
+  #   format: "json"
+
+# Event buffering configuration
+buffer_size: 1000           # Number of events to buffer before flushing
+flush_interval: "10s"       # How often to send events (e.g., 10s, 1m, 30s)
+
+# YAAT API endpoint (required)
+# Production: https://yaat.io/v1/ingest
+# Staging: https://staging.yaat.io/v1/ingest
+api_endpoint: "https://yaat.io/v1/ingest"
+`
+
+	return os.WriteFile(path, []byte(sampleConfig), 0644)
+}

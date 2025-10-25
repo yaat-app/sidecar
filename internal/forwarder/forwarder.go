@@ -130,3 +130,29 @@ func isRetryable(err error) bool {
 	_, ok := err.(*RetryableError)
 	return ok
 }
+
+// Test tests the API connection without sending events
+func (f *Forwarder) Test() error {
+	req, err := http.NewRequest("GET", f.apiEndpoint, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", f.apiKey))
+
+	resp, err := f.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("connection failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == 401 {
+		return fmt.Errorf("invalid API key")
+	}
+
+	if resp.StatusCode >= 500 {
+		return fmt.Errorf("server error: %d", resp.StatusCode)
+	}
+
+	return nil
+}
