@@ -1,6 +1,6 @@
 [Unit]
 Description=YAAT Sidecar - Backend Monitoring Agent
-Documentation=https://docs.yaat.io
+Documentation=https://yaat.io/docs
 After=network.target
 
 [Service]
