@@ -49,6 +49,7 @@ buffer_size: 1000
 flush_interval: "10s"
 
 # YAAT API endpoint (required)
-# Production: https://api.yaat.io/v1/ingest
-# Staging: https://staging-api.yaat.io/v1/ingest
-api_endpoint: "https://api.yaat.io/v1/ingest"
+# Production: https://yaat.io/v1/ingest
+# Staging: https://staging.yaat.io/v1/ingest
+# Development: http://localhost:8000/api/v1/ingest
+api_endpoint: "https://yaat.io/v1/ingest"

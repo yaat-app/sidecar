@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -8,7 +9,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
+
+	"github.com/yaat/sidecar/internal/config"
 )
 
 const (
@@ -83,17 +87,12 @@ func Start(configPath, logFilePath string, verbose bool) error {
 
 // Stop stops the daemon process
 func Stop() error {
-	pidPath := getPidFilePath()
-
-	// Read PID from file
-	pidBytes, err := ioutil.ReadFile(pidPath)
+	pid, pidPath, err := readPID()
 	if err != nil {
-		return fmt.Errorf("failed to read PID file: %w", err)
-	}
-
-	pid, err := strconv.Atoi(string(pidBytes))
-	if err != nil {
-		return fmt.Errorf("invalid PID in file: %w", err)
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("sidecar is not running")
+		}
+		return err
 	}
 
 	// Find the process
@@ -115,20 +114,7 @@ func Stop() error {
 
 // IsRunning checks if the daemon is currently running
 func IsRunning() bool {
-	pidPath := getPidFilePath()
-
-	// Check if PID file exists
-	if _, err := os.Stat(pidPath); os.IsNotExist(err) {
-		return false
-	}
-
-	// Read PID
-	pidBytes, err := ioutil.ReadFile(pidPath)
-	if err != nil {
-		return false
-	}
-
-	pid, err := strconv.Atoi(string(pidBytes))
+	pid, _, err := readPID()
 	if err != nil {
 		return false
 	}
@@ -160,12 +146,24 @@ func Uninstall() error {
 	}
 
 	// Remove PID file
-	os.Remove(getPidFilePath())
+	pidPath := GetPidPath()
+	os.Remove(pidPath)
+	if dir := filepath.Dir(pidPath); dir != "." && dir != "/" {
+		os.Remove(dir)
+	}
 
 	// Remove log file
-	os.Remove(GetLogPath())
+	logPath := GetLogPath()
+	os.Remove(logPath)
+	os.RemoveAll(filepath.Dir(logPath))
 
 	// Remove config file if in default location
+	defaultConfig := config.DefaultConfigPath()
+	os.Remove(defaultConfig)
+	if dir := filepath.Dir(defaultConfig); dir != "." && dir != "/" {
+		// Remove directory if empty
+		os.Remove(dir)
+	}
 	os.Remove("yaat.yaml")
 
 	// On macOS, remove launchd plist
@@ -210,10 +208,31 @@ func writePidFile(path string, pid int) error {
 }
 
 func getPidFilePath() string {
-	pidPath := pidFile
-	if _, err := os.Stat("/var/run"); os.IsNotExist(err) || os.IsPermission(err) {
-		home, _ := os.UserHomeDir()
-		pidPath = filepath.Join(home, ".yaat", "sidecar.pid")
+	if _, err := os.Stat(pidFile); err == nil {
+		return pidFile
 	}
-	return pidPath
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		return pidFile
+	}
+	userPid := filepath.Join(home, ".yaat", "sidecar.pid")
+	if _, err := os.Stat(userPid); err == nil {
+		return userPid
+	}
+	return userPid
+}
+
+func readPID() (int, string, error) {
+	pidPath := getPidFilePath()
+
+	pidBytes, err := ioutil.ReadFile(pidPath)
+	if err != nil {
+		return 0, pidPath, fmt.Errorf("failed to read PID file: %w", err)
+	}
+
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
+	if err != nil {
+		return 0, pidPath, fmt.Errorf("invalid PID in file: %w", err)
+	}
+	return pid, pidPath, nil
 }

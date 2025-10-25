@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -16,27 +17,38 @@ import (
 	"github.com/yaat/sidecar/internal/health"
 	"github.com/yaat/sidecar/internal/logs"
 	"github.com/yaat/sidecar/internal/proxy"
+	"github.com/yaat/sidecar/internal/selfupdate"
+	"github.com/yaat/sidecar/internal/setup"
 )
 
-const version = "1.0.0"
+const version = "1.1.0"
 
 func main() {
-	// Parse command-line flags
 	var (
-		configPath    = flag.String("config", "yaat.yaml", "Path to configuration file")
-		showVersion   = flag.Bool("version", false, "Show version and exit")
-		daemonMode    = flag.Bool("daemon", false, "Run in background (daemon mode)")
-		daemonShort   = flag.Bool("d", false, "Run in background (short flag)")
-		logFile       = flag.String("log-file", "", "Write logs to file instead of stderr")
-		verbose       = flag.Bool("verbose", false, "Enable verbose/debug logging")
-		verboseShort  = flag.Bool("v", false, "Enable verbose/debug logging (short flag)")
-		initConfig    = flag.Bool("init", false, "Create sample configuration file")
-		validateCfg   = flag.Bool("validate", false, "Validate configuration and exit")
-		testAPI       = flag.Bool("test", false, "Test API connection and exit")
-		uninstall     = flag.Bool("uninstall", false, "Uninstall sidecar and cleanup")
-		healthPort    = flag.Int("health-port", 0, "Enable health check endpoint on this port")
+		configPath     = flag.String("config", "yaat.yaml", "Path to configuration file")
+		showVersion    = flag.Bool("version", false, "Show version and exit")
+		daemonMode     = flag.Bool("daemon", false, "Run in background (daemon mode)")
+		daemonShort    = flag.Bool("d", false, "Run in background (short flag)")
+		logFile        = flag.String("log-file", "", "Write logs to file instead of stderr")
+		verbose        = flag.Bool("verbose", false, "Enable verbose/debug logging")
+		verboseShort   = flag.Bool("v", false, "Enable verbose/debug logging (short flag)")
+		initConfig     = flag.Bool("init", false, "Create sample configuration file")
+		validateCfg    = flag.Bool("validate", false, "Validate configuration and exit")
+		testAPIFlag    = flag.Bool("test", false, "Test API connection and exit")
+		uninstall      = flag.Bool("uninstall", false, "Uninstall sidecar and cleanup")
+		uninstallAlias = flag.Bool("uninsatll", false, "Uninstall sidecar (alias)")
+		setupWizard    = flag.Bool("setup", false, "Launch interactive setup wizard")
+		updateBinary   = flag.Bool("update", false, "Update sidecar to the latest release")
+		startService   = flag.Bool("start", false, "Start sidecar as background service")
+		stopService    = flag.Bool("stop", false, "Stop background sidecar service")
+		restartService = flag.Bool("restart", false, "Restart background sidecar service")
+		statusService  = flag.Bool("status", false, "Show background service status")
+		healthPort     = flag.Int("health-port", 0, "Enable health check endpoint on this port")
 	)
 	flag.Parse()
+
+	isVerbose := *verbose || *verboseShort
+	isDaemon := *daemonMode || *daemonShort || *startService
 
 	// Handle version flag
 	if *showVersion {
@@ -45,20 +57,47 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Handle update flag
+	if *updateBinary {
+		fmt.Println("Checking for updates...")
+		result, err := selfupdate.Run(version)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Update failed: %v\n", err)
+			os.Exit(1)
+		}
+		if result.Updated {
+			fmt.Printf("✓ Updated YAAT Sidecar from %s to %s\n", result.FromVersion, result.ToVersion)
+		} else {
+			fmt.Printf("✓ Already running the latest version (%s)\n", result.ToVersion)
+		}
+		os.Exit(0)
+	}
+
+	// Handle setup wizard
+	if *setupWizard {
+		target := preferredConfigPath(*configPath)
+		if err := setup.Run(target); err != nil {
+			fmt.Fprintf(os.Stderr, "Setup failed: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	// Handle init flag - create sample config
 	if *initConfig {
-		if err := config.CreateSampleConfig(*configPath); err != nil {
+		target := preferredConfigPath(*configPath)
+		if err := config.CreateSampleConfig(target); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to create config: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("✓ Created sample configuration at %s\n", *configPath)
+		fmt.Printf("✓ Created sample configuration at %s\n", target)
 		fmt.Println("Edit this file with your API key and settings, then run:")
-		fmt.Println("  yaat-sidecar --config", *configPath)
+		fmt.Println("  yaat-sidecar --config", target)
 		os.Exit(0)
 	}
 
 	// Handle uninstall flag
-	if *uninstall {
+	if *uninstall || *uninstallAlias {
 		if err := daemon.Uninstall(); err != nil {
 			fmt.Fprintf(os.Stderr, "Uninstall failed: %v\n", err)
 			os.Exit(1)
@@ -67,9 +106,59 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Combine short and long flags
-	isDaemon := *daemonMode || *daemonShort
-	isVerbose := *verbose || *verboseShort
+	// Handle stop flag
+	if *stopService {
+		if err := daemon.Stop(); err != nil {
+			if isNotRunningError(err) {
+				fmt.Println("ℹ️ Sidecar is not running")
+				os.Exit(0)
+			}
+			fmt.Fprintf(os.Stderr, "Failed to stop sidecar: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("✓ Sidecar stopped")
+		os.Exit(0)
+	}
+
+	// Handle status flag
+	if *statusService {
+		if daemon.IsRunning() {
+			pid := "unknown"
+			if data, err := os.ReadFile(daemon.GetPidPath()); err == nil {
+				if trimmed := strings.TrimSpace(string(data)); trimmed != "" {
+					pid = trimmed
+				}
+			}
+			fmt.Printf("✓ YAAT Sidecar is running (PID %s)\n", pid)
+			fmt.Printf("  Logs: %s\n", daemon.GetLogPath())
+		} else {
+			fmt.Println("✗ YAAT Sidecar is not running")
+		}
+		os.Exit(0)
+	}
+
+	// Handle restart flag
+	if *restartService {
+		cfg, err := config.LoadConfig(*configPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
+			os.Exit(1)
+		}
+		if daemon.IsRunning() {
+			if err := daemon.Stop(); err != nil && !isNotRunningError(err) {
+				fmt.Fprintf(os.Stderr, "Failed to stop running sidecar: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Println("✓ Stopped existing sidecar")
+		}
+		if err := daemon.Start(cfg.SourcePath, *logFile, isVerbose); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to start sidecar: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("✓ Sidecar restarted in background")
+		fmt.Printf("  Logs: %s\n", daemon.GetLogPath())
+		os.Exit(0)
+	}
 
 	// Setup logging
 	setupLogging(*logFile, isVerbose)
@@ -85,8 +174,9 @@ func main() {
 	// Load configuration
 	cfg, err := config.LoadConfig(*configPath)
 	if err != nil {
-		log.Fatalf("[Sidecar] Failed to load config: %v", err)
+		log.Fatalf("[Sidecar] Failed to load config: %v\nRun `yaat-sidecar --setup` to generate one.", err)
 	}
+	resolvedConfigPath := cfg.SourcePath
 
 	// Handle validate flag
 	if *validateCfg {
@@ -100,7 +190,7 @@ func main() {
 	}
 
 	// Handle test flag - test API connection
-	if *testAPI {
+	if *testAPIFlag {
 		fmt.Println("Testing API connection...")
 		fwd := forwarder.New(cfg.APIEndpoint, cfg.APIKey)
 		if err := fwd.Test(); err != nil {
@@ -113,17 +203,17 @@ func main() {
 
 	// Handle daemon mode
 	if isDaemon {
-		if err := daemon.Start(*configPath, *logFile, isVerbose); err != nil {
+		if err := daemon.Start(resolvedConfigPath, *logFile, isVerbose); err != nil {
 			log.Fatalf("[Sidecar] Failed to start daemon: %v", err)
 		}
 		fmt.Println("✓ Sidecar started in background")
 		fmt.Println("  Check logs with: tail -f", daemon.GetLogPath())
-		fmt.Println("  Stop with: kill $(cat", daemon.GetPidPath()+")")
+		fmt.Println("  Manage with: yaat-sidecar --status | --stop | --restart")
 		os.Exit(0)
 	}
 
 	log.Printf("[Sidecar] YAAT Sidecar v%s starting...", version)
-	log.Printf("[Sidecar] Config file: %s", *configPath)
+	log.Printf("[Sidecar] Config file: %s", resolvedConfigPath)
 
 	log.Printf("[Sidecar] Service: %s (environment: %s)", cfg.ServiceName, cfg.Environment)
 	log.Printf("[Sidecar] API endpoint: %s", cfg.APIEndpoint)
@@ -278,4 +368,18 @@ func getOS() string {
 func getArch() string {
 	// This is a simplified version - in production you'd check runtime.GOARCH
 	return "amd64" // Placeholder
+}
+
+func preferredConfigPath(provided string) string {
+	if provided != "" && provided != "yaat.yaml" {
+		return provided
+	}
+	return config.DefaultConfigPath()
+}
+
+func isNotRunningError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "not running")
 }

@@ -1,8 +1,11 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -23,25 +26,25 @@ type LogConfig struct {
 
 // Config represents the sidecar configuration
 type Config struct {
-	APIKey        string        `yaml:"api_key"`
-	ServiceName   string        `yaml:"service_name"`
-	Environment   string        `yaml:"environment"`
-	Proxy         ProxyConfig   `yaml:"proxy"`
-	Logs          []LogConfig   `yaml:"logs"`
-	BufferSize    int           `yaml:"buffer_size"`
-	FlushInterval string        `yaml:"flush_interval"`
-	APIEndpoint   string        `yaml:"api_endpoint"`
+	APIKey        string      `yaml:"api_key"`
+	ServiceName   string      `yaml:"service_name"`
+	Environment   string      `yaml:"environment"`
+	Proxy         ProxyConfig `yaml:"proxy"`
+	Logs          []LogConfig `yaml:"logs"`
+	BufferSize    int         `yaml:"buffer_size"`
+	FlushInterval string      `yaml:"flush_interval"`
+	APIEndpoint   string      `yaml:"api_endpoint"`
 
 	// Parsed flush interval
 	FlushIntervalDuration time.Duration `yaml:"-"`
+	SourcePath            string        `yaml:"-"`
 }
 
 // LoadConfig loads configuration from a YAML file
 func LoadConfig(path string) (*Config, error) {
-	// Read file
-	data, err := os.ReadFile(path)
+	data, resolvedPath, err := readConfig(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read config file: %w", err)
+		return nil, err
 	}
 
 	// Parse YAML
@@ -50,34 +53,14 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config: %w", err)
 	}
 
-	// Validate required fields
-	if cfg.APIKey == "" {
-		return nil, fmt.Errorf("api_key is required")
-	}
-	if cfg.ServiceName == "" {
-		return nil, fmt.Errorf("service_name is required")
-	}
-	if cfg.APIEndpoint == "" {
-		return nil, fmt.Errorf("api_endpoint is required")
-	}
+	cfg.SourcePath = resolvedPath
 
-	// Set defaults
-	if cfg.Environment == "" {
-		cfg.Environment = "production"
+	if err := cfg.applyDefaults(); err != nil {
+		return nil, err
 	}
-	if cfg.BufferSize == 0 {
-		cfg.BufferSize = 1000
+	if err := cfg.validate(); err != nil {
+		return nil, err
 	}
-	if cfg.FlushInterval == "" {
-		cfg.FlushInterval = "10s"
-	}
-
-	// Parse flush interval
-	duration, err := time.ParseDuration(cfg.FlushInterval)
-	if err != nil {
-		return nil, fmt.Errorf("invalid flush_interval: %w", err)
-	}
-	cfg.FlushIntervalDuration = duration
 
 	return &cfg, nil
 }
@@ -131,5 +114,139 @@ flush_interval: "10s"       # How often to send events (e.g., 10s, 1m, 30s)
 api_endpoint: "https://yaat.io/v1/ingest"
 `
 
-	return os.WriteFile(path, []byte(sampleConfig), 0644)
+	dir := filepath.Dir(path)
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("failed to create config directory %s: %w", dir, err)
+		}
+	}
+
+	return os.WriteFile(path, []byte(sampleConfig), 0o600)
+}
+
+// SaveConfig persists the configuration to disk, creating parent directories when required.
+func SaveConfig(path string, cfg *Config) error {
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
+	}
+
+	if err := cfg.validate(); err != nil {
+		return err
+	}
+	if err := cfg.applyDefaults(); err != nil {
+		return err
+	}
+
+	dir := filepath.Dir(path)
+	if dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return fmt.Errorf("failed to create config directory %s: %w", dir, err)
+		}
+	}
+
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("failed to write config: %w", err)
+	}
+
+	cfg.SourcePath = path
+	return nil
+}
+
+// DefaultConfigPath returns the recommended location for the config file.
+func DefaultConfigPath() string {
+	if override := os.Getenv("YAAT_CONFIG_PATH"); override != "" {
+		return override
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".yaat", "yaat.yaml")
+	}
+	return "yaat.yaml"
+}
+
+func (cfg *Config) validate() error {
+	if cfg.APIKey == "" {
+		return fmt.Errorf("api_key is required")
+	}
+	if cfg.ServiceName == "" {
+		return fmt.Errorf("service_name is required")
+	}
+	if cfg.APIEndpoint == "" {
+		return fmt.Errorf("api_endpoint is required")
+	}
+	return nil
+}
+
+func (cfg *Config) applyDefaults() error {
+	if cfg.Environment == "" {
+		cfg.Environment = "production"
+	}
+	if cfg.BufferSize == 0 {
+		cfg.BufferSize = 1000
+	}
+	if cfg.FlushInterval == "" {
+		cfg.FlushInterval = "10s"
+	}
+	duration, err := time.ParseDuration(cfg.FlushInterval)
+	if err != nil {
+		return fmt.Errorf("invalid flush_interval: %w", err)
+	}
+	cfg.FlushIntervalDuration = duration
+	return nil
+}
+
+func readConfig(path string) ([]byte, string, error) {
+	candidates := []string{path}
+
+	// When a relative filename is provided, probe common locations.
+	if !filepath.IsAbs(path) {
+		if wd, err := os.Getwd(); err == nil {
+			candidates = append(candidates, filepath.Join(wd, path))
+		}
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			candidates = append(candidates,
+				filepath.Join(home, ".yaat", path),
+				filepath.Join(home, ".config", "yaat", path),
+			)
+		}
+		candidates = append(candidates, filepath.Join("/etc/yaat", path))
+	}
+
+	seen := make(map[string]struct{})
+	for _, candidate := range candidates {
+		clean := filepath.Clean(candidate)
+		if _, exists := seen[clean]; exists {
+			continue
+		}
+		seen[clean] = struct{}{}
+
+		data, err := os.ReadFile(clean)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return nil, "", fmt.Errorf("failed to read config file %s: %w", clean, err)
+		}
+		return data, clean, nil
+	}
+
+	return nil, "", fmt.Errorf("config file not found (searched: %s)", strings.Join(uniquePaths(candidates), ", "))
+}
+
+func uniquePaths(paths []string) []string {
+	unique := make([]string, 0, len(paths))
+	seen := make(map[string]struct{})
+	for _, p := range paths {
+		clean := filepath.Clean(p)
+		if _, ok := seen[clean]; ok {
+			continue
+		}
+		seen[clean] = struct{}{}
+		unique = append(unique, clean)
+	}
+	return unique
 }

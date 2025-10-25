@@ -75,22 +75,34 @@ CGO_ENABLED=0 go build -o yaat-sidecar ./cmd
 
 ## Quick Start
 
-### 1. Get Your API Key
-
-1. Log in to your [YAAT dashboard](https://yaat.io/welcomwe)
-2. Navigate to **Settings** → **API Keys**
-3. Click **Create API Key**
-4. Copy the generated key (shown only once!)
-
-### 2. Create Configuration File
-
-Download the example configuration:
+### 1. Launch the setup wizard
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/yaat-app/sidecar/main/yaat.yaml.example -o yaat.yaml
+yaat-sidecar --setup
 ```
 
-Or create it manually:
+The wizard will guide you through:
+
+- grabbing your API key (Dashboard → Settings → API Keys)
+- detecting common log files (Nginx, Django, JSON)
+- enabling the built-in HTTP proxy if desired
+- optionally starting the sidecar in the background as a daemon
+
+### 2. Manage the sidecar
+
+- `yaat-sidecar --status` – check whether the daemon is running
+- `yaat-sidecar --stop` – stop the background service
+- `yaat-sidecar --restart` – restart with the latest config
+- `yaat-sidecar --update` – self-update to the newest release
+- `yaat-sidecar --uninstall` – remove the binary, logs, and service files
+
+### 3. Verify in the dashboard
+
+Visit your YAAT dashboard at [yaat.io](https://yaat.io) → **Services** to confirm events are flowing.
+
+## Manual configuration (optional)
+
+Prefer to manage the YAML yourself? Create `yaat.yaml` (for example in `~/.yaat/yaat.yaml`) with:
 
 ```yaml
 # Your YAAT API key
@@ -117,25 +129,19 @@ logs:
 api_endpoint: "https://yaat.io/v1/ingest"
 ```
 
-### 3. Start the Sidecar
+Then run:
 
 ```bash
 yaat-sidecar --config yaat.yaml
 ```
 
-### 4. Route Traffic (for HTTP monitoring)
-
-If using proxy mode, update your load balancer or nginx to point to the sidecar:
+If proxy mode is enabled, update your load balancer or nginx to point to the sidecar:
 
 ```nginx
 upstream app {
     server 127.0.0.1:19000;  # Sidecar port
 }
 ```
-
-### 5. Verify in Dashboard
-
-Visit your YAAT dashboard at [yaat.io](https://yaat.io) → **Services** to see your service and incoming events!
 
 ## Configuration
 
