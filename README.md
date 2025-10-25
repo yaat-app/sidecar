@@ -12,7 +12,7 @@ Backend monitoring agent for the YAAT analytics platform. Monitor your productio
 - **Multiple Format Support**: Django, Nginx, and JSON logs out of the box
 - **Zero Code Changes**: Deploy as a sidecar alongside your application
 - **Buffered Delivery**: Efficient batching with automatic retry and backoff
-- **Multi-Platform**: Linux, macOS, and Windows support
+- **Multi-Platform**: Linux and macOS support (Windows via WSL2)
 
 ## Installation
 
@@ -38,7 +38,8 @@ This will:
    - **Linux (arm64)**: `yaat-sidecar-linux-arm64.tar.gz`
    - **macOS (Intel)**: `yaat-sidecar-darwin-amd64.tar.gz`
    - **macOS (Apple Silicon)**: `yaat-sidecar-darwin-arm64.tar.gz`
-   - **Windows**: `yaat-sidecar-windows-amd64.exe.zip`
+
+   > **Windows Users**: Use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) and install the Linux version.
 
 2. **Extract and install**:
 

@@ -48,11 +48,6 @@ jobs:
             goarch: arm64
             output: yaat-sidecar-darwin-arm64
 
-          # Windows
-          - goos: windows
-            goarch: amd64
-            output: yaat-sidecar-windows-amd64.exe
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -70,17 +65,10 @@ jobs:
         run: |
           go build -ldflags="-w -s -X main.version=${{ github.ref_name }}" -o ${{ matrix.output }} ./cmd
 
-      - name: Create tarball (non-Windows)
-        if: matrix.goos != 'windows'
+      - name: Create tarball
         run: |
           tar -czf ${{ matrix.output }}.tar.gz ${{ matrix.output }} yaat.yaml.example README.md
           sha256sum ${{ matrix.output }}.tar.gz > ${{ matrix.output }}.tar.gz.sha256
-
-      - name: Create zip (Windows)
-        if: matrix.goos == 'windows'
-        run: |
-          zip ${{ matrix.output }}.zip ${{ matrix.output }} yaat.yaml.example README.md
-          sha256sum ${{ matrix.output }}.zip > ${{ matrix.output }}.zip.sha256
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -113,7 +101,6 @@ jobs:
           generate_release_notes: true
           files: |
             artifacts/**/*.tar.gz
-            artifacts/**/*.zip
             artifacts/**/*.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

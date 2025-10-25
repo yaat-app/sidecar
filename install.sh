@@ -38,8 +38,10 @@ detect_platform() {
         darwin*)
             OS="darwin"
             ;;
-        msys*|mingw*|cygwin*)
-            OS="windows"
+        msys*|mingw*|cygwin*|windows*)
+            print_error "Windows is not supported. Please use WSL2 and run this script inside WSL."
+            print_info "Install WSL2: https://learn.microsoft.com/en-us/windows/wsl/install"
+            exit 1
             ;;
         *)
             print_error "Unsupported operating system: $OS"
@@ -78,13 +80,8 @@ get_latest_version() {
 
 # Download and install binary
 install_binary() {
-    if [ "$OS" = "windows" ]; then
-        BINARY_FILE="${BINARY_NAME}-${OS}-${ARCH}.exe"
-        ARCHIVE_FILE="${BINARY_FILE}.zip"
-    else
-        BINARY_FILE="${BINARY_NAME}-${OS}-${ARCH}"
-        ARCHIVE_FILE="${BINARY_FILE}.tar.gz"
-    fi
+    BINARY_FILE="${BINARY_NAME}-${OS}-${ARCH}"
+    ARCHIVE_FILE="${BINARY_FILE}.tar.gz"
 
     DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ARCHIVE_FILE}"
 
@@ -101,11 +98,7 @@ install_binary() {
 
     print_info "Download complete. Extracting..."
 
-    if [ "$OS" = "windows" ]; then
-        unzip -q "$ARCHIVE_FILE"
-    else
-        tar -xzf "$ARCHIVE_FILE"
-    fi
+    tar -xzf "$ARCHIVE_FILE"
 
     # Make binary executable
     chmod +x "$BINARY_FILE"
