@@ -66,11 +66,15 @@ func (t *JournaldTailer) Start(matchUnit string) error {
 			default:
 			}
 
-			if ret := journal.Next(); ret < 0 {
-				if ret == -int(sdjournal.EOF) {
-					time.Sleep(200 * time.Millisecond)
-					continue
-				}
+			n, err := journal.Next()
+			if err != nil {
+				// Error occurred, wait and retry
+				time.Sleep(200 * time.Millisecond)
+				continue
+			}
+
+			if n == 0 {
+				// No new entries, wait before checking again
 				time.Sleep(200 * time.Millisecond)
 				continue
 			}
