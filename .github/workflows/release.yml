@@ -36,11 +36,11 @@ jobs:
           - goos: linux
             goarch: amd64
             output: yaat-sidecar-linux-amd64
-            requires_cgo: true
+            requires_cgo: false
           - goos: linux
             goarch: arm64
             output: yaat-sidecar-linux-arm64
-            requires_cgo: true
+            requires_cgo: false
 
           # macOS
           - goos: darwin
