@@ -72,7 +72,7 @@ func TestParseDjangoLogInvalid(t *testing.T) {
 
 func TestParseDjangoLogDifferentLevels(t *testing.T) {
 	tests := []struct {
-		logLevel     string
+		logLevel      string
 		expectedLevel string
 	}{
 		{"DEBUG", "debug"},
@@ -178,6 +178,61 @@ func TestParseNginxLogDifferentMethods(t *testing.T) {
 				t.Errorf("Expected operation '%s', got '%v'", expectedOp, (*event)["operation"])
 			}
 		})
+	}
+}
+
+func TestParseDockerLogEnvelope(t *testing.T) {
+	line := `{"log":"{\"message\":\"hello\",\"level\":\"warning\",\"custom\":\"x\"}\n","stream":"stdout","time":"2024-10-26T12:00:00.123456789Z","containerID":"abc123","source":"compose"}`
+	event := ParseDockerLog(line, "svc", "prod")
+	if event == nil {
+		t.Fatal("ParseDockerLog returned nil")
+	}
+
+	if (*event)["message"] != "hello" {
+		t.Errorf("expected message 'hello', got %v", (*event)["message"])
+	}
+	if (*event)["level"] != "warning" {
+		t.Errorf("expected level 'warning', got %v", (*event)["level"])
+	}
+
+	tags, ok := (*event)["tags"].(map[string]string)
+	if !ok {
+		t.Fatalf("expected tags map, got %T", (*event)["tags"])
+	}
+
+	if tags["container.stream"] != "stdout" {
+		t.Errorf("expected container.stream stdout, got %s", tags["container.stream"])
+	}
+	if tags["container.runtime"] != "docker" {
+		t.Errorf("expected container.runtime docker, got %s", tags["container.runtime"])
+	}
+	if tags["container.id"] != "abc123" {
+		t.Errorf("expected container.id abc123, got %s", tags["container.id"])
+	}
+	if tags["container.source"] != "compose" {
+		t.Errorf("expected container.source compose, got %s", tags["container.source"])
+	}
+	if tags["custom"] != "x" {
+		t.Errorf("expected custom tag from JSON payload, got %v", tags["custom"])
+	}
+}
+
+func TestParseDockerLogStderrFallback(t *testing.T) {
+	line := `{"log":"plain line\n","stream":"stderr","time":"2024-10-26T12:00:00Z","containerID":"def456"}`
+	event := ParseDockerLog(line, "svc", "prod")
+	if event == nil {
+		t.Fatal("ParseDockerLog returned nil")
+	}
+	if (*event)["message"] != "plain line" {
+		t.Errorf("expected trimmed message, got %v", (*event)["message"])
+	}
+	if (*event)["level"] != "error" {
+		t.Errorf("expected level error for stderr stream, got %v", (*event)["level"])
+	}
+
+	tags := (*event)["tags"].(map[string]string)
+	if tags["container.stream"] != "stderr" {
+		t.Errorf("expected stderr stream tag, got %s", tags["container.stream"])
 	}
 }
 

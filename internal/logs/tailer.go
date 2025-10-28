@@ -2,9 +2,11 @@ package logs
 
 import (
 	"log"
+	"strings"
 
 	"github.com/hpcloud/tail"
-	"github.com/yaat/sidecar/internal/buffer"
+	"github.com/yaat-app/sidecar/internal/buffer"
+	"github.com/yaat-app/sidecar/internal/scrubber"
 )
 
 // Tailer tails a log file and parses lines
@@ -14,6 +16,11 @@ type Tailer struct {
 	serviceName string
 	environment string
 	buffer      *buffer.Buffer
+
+	// Multi-line tracking for stack traces
+	inTraceback    bool
+	tracebackLines []string
+	lastErrorEvent *buffer.Event
 }
 
 // New creates a new Tailer
@@ -31,9 +38,9 @@ func New(path, format, serviceName, environment string, buf *buffer.Buffer) *Tai
 func (t *Tailer) Start() error {
 	// Configure tail
 	config := tail.Config{
-		Follow: true,               // Continue watching for new lines
-		ReOpen: true,               // Reopen file if rotated
-		Poll:   true,               // Use polling (works with log rotation)
+		Follow: true, // Continue watching for new lines
+		ReOpen: true, // Reopen file if rotated
+		Poll:   true, // Use polling (works with log rotation)
 		Location: &tail.SeekInfo{
 			Offset: 0,
 			Whence: 2, // Start at end of file (only read new lines)
@@ -62,10 +69,28 @@ func (t *Tailer) Start() error {
 				continue
 			}
 
+			// Handle multi-line tracebacks for Django format
+			if t.format == "django" {
+				if t.handleMultiLineLog(line.Text) {
+					continue // Line was part of traceback
+				}
+			}
+
 			// Parse log line
 			event := ParseLog(line.Text, t.format, t.serviceName, t.environment)
 			if event == nil {
 				continue
+			}
+
+			if !scrubber.Apply(*event) {
+				continue
+			}
+
+			// Track error events for potential tracebacks
+			if t.format == "django" {
+				if level, ok := (*event)["level"].(string); ok && (level == "error" || level == "critical") {
+					t.lastErrorEvent = event
+				}
 			}
 
 			// Add to buffer
@@ -74,4 +99,67 @@ func (t *Tailer) Start() error {
 	}()
 
 	return nil
+}
+
+// handleMultiLineLog processes multi-line log entries (like stack traces)
+// Returns true if the line was handled as part of a multi-line log
+func (t *Tailer) handleMultiLineLog(line string) bool {
+	// Check if this is the start of a traceback
+	if !t.inTraceback && line == "Traceback (most recent call last):" {
+		t.inTraceback = true
+		t.tracebackLines = []string{line}
+		return true
+	}
+
+	// If we're in a traceback, accumulate lines
+	if t.inTraceback {
+		t.tracebackLines = append(t.tracebackLines, line)
+
+		// Check if this is the end of the traceback
+		// Tracebacks typically end with an exception line (not indented as much)
+		// e.g., "ValueError: Something went wrong"
+		// Look for lines that don't start with lots of spaces and contain ": "
+		trimmed := strings.TrimSpace(line)
+		if len(trimmed) > 0 && !strings.HasPrefix(line, "  File ") && !strings.HasPrefix(line, "    ") {
+			// Check if it looks like an exception (contains ": " or is an exception class)
+			if strings.Contains(trimmed, ": ") || isExceptionLine(trimmed) {
+				// Traceback complete - attach to last error event
+				if t.lastErrorEvent != nil {
+					stacktrace := strings.Join(t.tracebackLines, "\n")
+					(*t.lastErrorEvent)["stacktrace"] = stacktrace
+					log.Printf("[Tailer] Captured traceback (%d lines) for error event", len(t.tracebackLines))
+				}
+
+				// Reset state
+				t.inTraceback = false
+				t.tracebackLines = nil
+				t.lastErrorEvent = nil
+				return true
+			}
+		}
+
+		return true
+	}
+
+	return false
+}
+
+// isExceptionLine checks if a line looks like a Python exception
+func isExceptionLine(line string) bool {
+	// Common Python exception types
+	exceptions := []string{
+		"Exception", "Error", "Warning",
+		"ValueError", "TypeError", "KeyError", "AttributeError",
+		"IndexError", "RuntimeError", "ImportError", "IOError",
+		"OSError", "NameError", "SyntaxError", "IndentationError",
+		"AssertionError", "ZeroDivisionError", "FileNotFoundError",
+	}
+
+	for _, exc := range exceptions {
+		if strings.HasPrefix(line, exc) {
+			return true
+		}
+	}
+
+	return false
 }

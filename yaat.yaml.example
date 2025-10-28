@@ -36,9 +36,26 @@ logs:
   - path: "/var/log/nginx/access.log"
     format: "nginx"
 
+  # Docker/Kubernetes container stdout (JSON envelope)
+  - path: "/var/lib/docker/containers/<container-id>/<container-id>-json.log"
+    format: "docker"
+
   # Add more log files as needed
   # - path: "/var/log/myapp/errors.log"
   #   format: "json"
+
+# Scrubbing rules (mask secrets before shipping events)
+scrubbing:
+  enabled: true
+  rules:
+    - name: "Mask Authorization bearer tokens"
+      pattern: "(?i)(authorization:?\\s*bearer\\s+)[A-Za-z0-9._~-]+"
+      replacement: "$1[REDACTED]"
+      fields: ["message", "stacktrace", "tags.authorization"]
+    - name: "Mask email addresses"
+      pattern: "(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}"
+      replacement: "[EMAIL]"
+      fields: ["message", "stacktrace", "tags.*"]
 
 # Event buffering configuration
 # Buffer size (number of events)
@@ -48,8 +65,19 @@ buffer_size: 1000
 # Format: 10s, 1m, 30s, etc.
 flush_interval: "10s"
 
+# Host metrics & StatsD listener
+metrics:
+  enabled: false
+  interval: "30s"
+  tags: {}
+  statsd:
+    enabled: false
+    listen_addr: ":8125"
+    namespace: ""
+    tags: {}
+
 # YAAT API endpoint (required)
-# Production: https://yaat.io/v1/ingest
-# Staging: https://staging.yaat.io/v1/ingest
+# Production: https://yaat.io/api/v1/ingest
+# Staging: https://staging.yaat.io/api/v1/ingest
 # Development: http://localhost:8000/api/v1/ingest
-api_endpoint: "https://yaat.io/v1/ingest"
+api_endpoint: "https://yaat.io/api/v1/ingest"

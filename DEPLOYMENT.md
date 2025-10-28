@@ -145,7 +145,7 @@ Update the API endpoint in your production YAAT instance:
 
 1. Update `yaat.yaml.example` to use production API:
    ```yaml
-   api_endpoint: "https://yaat.io/v1/ingest"
+   api_endpoint: "https://yaat.io/api/v1/ingest"
    ```
 
 2. Ensure the dashboard links are correct:

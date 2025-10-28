@@ -1,5 +1,5 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
 # YAAT Sidecar Installation Script
 # Usage: curl -sSL https://raw.githubusercontent.com/yaat-app/sidecar/main/install.sh | bash
@@ -7,40 +7,63 @@ set -e
 REPO="yaat-app/sidecar"
 INSTALL_DIR="/usr/local/bin"
 BINARY_NAME="yaat-sidecar"
+NONINTERACTIVE="${YAAT_NONINTERACTIVE:-0}"
 
-# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-print_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
+OS=""
+ARCH=""
+VERSION=""
+
+print_info() { echo -e "${GREEN}[INFO]${NC} $1"; }
+print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+print_warning() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+
+have_command() { command -v "$1" >/dev/null 2>&1; }
+
+run_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
 }
 
-print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+prompt_yes_no() {
+    local prompt="$1"
+    local default="${2:-y}"
+    local response
+
+    if [ "$NONINTERACTIVE" = "1" ]; then
+        case "$default" in
+            y|Y|yes|YES) return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
+
+    while true; do
+        read -r -p "$prompt" response
+        response="${response:-${default}}"
+        case "$response" in
+            [yY]|[yY][eE][sS]) return 0 ;;
+            [nN]|[nN][oO]) return 1 ;;
+            *) echo "Please answer yes or no." ;;
+        esac
+    done
 }
 
-print_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-# Detect OS and architecture
 detect_platform() {
     OS=$(uname -s | tr '[:upper:]' '[:lower:]')
     ARCH=$(uname -m)
 
     case "$OS" in
-        linux*)
-            OS="linux"
-            ;;
-        darwin*)
-            OS="darwin"
-            ;;
+        linux*) OS="linux" ;;
+        darwin*) OS="darwin" ;;
         msys*|mingw*|cygwin*|windows*)
-            print_error "Windows is not supported. Please use WSL2 and run this script inside WSL."
-            print_info "Install WSL2: https://learn.microsoft.com/en-us/windows/wsl/install"
+            print_error "Windows is not supported. Use WSL2 and run this script inside WSL."
             exit 1
             ;;
         *)
@@ -50,12 +73,8 @@ detect_platform() {
     esac
 
     case "$ARCH" in
-        x86_64|amd64)
-            ARCH="amd64"
-            ;;
-        aarch64|arm64)
-            ARCH="arm64"
-            ;;
+        x86_64|amd64) ARCH="amd64" ;;
+        aarch64|arm64) ARCH="arm64" ;;
         *)
             print_error "Unsupported architecture: $ARCH"
             exit 1
@@ -65,108 +84,259 @@ detect_platform() {
     print_info "Detected platform: ${OS}-${ARCH}"
 }
 
-# Get latest release version
 get_latest_version() {
     print_info "Fetching latest release..."
-    VERSION=$(curl -s "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-
+    VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     if [ -z "$VERSION" ]; then
-        print_error "Failed to fetch latest version"
+        print_error "Failed to determine latest release."
         exit 1
     fi
-
-    print_info "Latest version: $VERSION"
+    print_info "Latest version: ${VERSION}"
 }
 
-# Download and install binary
 install_binary() {
-    BINARY_FILE="${BINARY_NAME}-${OS}-${ARCH}"
-    ARCHIVE_FILE="${BINARY_FILE}.tar.gz"
+    local binary_file="${BINARY_NAME}-${OS}-${ARCH}"
+    local archive_file="${binary_file}.tar.gz"
+    local download_url="https://github.com/${REPO}/releases/download/${VERSION}/${archive_file}"
 
-    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/${ARCHIVE_FILE}"
+    print_info "Downloading ${download_url}"
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    trap 'rm -rf "${tmp_dir}"' EXIT
 
-    print_info "Downloading from: $DOWNLOAD_URL"
+    (cd "$tmp_dir" && curl -fsSL "$download_url" -o "$archive_file")
+    print_info "Extracting archive..."
+    (cd "$tmp_dir" && tar -xzf "$archive_file")
 
-    TMP_DIR=$(mktemp -d)
-    cd "$TMP_DIR"
-
-    if ! curl -sSL "$DOWNLOAD_URL" -o "$ARCHIVE_FILE"; then
-        print_error "Failed to download binary"
-        rm -rf "$TMP_DIR"
-        exit 1
-    fi
-
-    print_info "Download complete. Extracting..."
-
-    tar -xzf "$ARCHIVE_FILE"
-
-    # Make binary executable
-    chmod +x "$BINARY_FILE"
-
-    # Install to system
-    print_info "Installing to ${INSTALL_DIR}..."
-
-    # Check if we need sudo
-    if [ -w "$INSTALL_DIR" ]; then
-        mv "$BINARY_FILE" "${INSTALL_DIR}/${BINARY_NAME}"
-    else
-        print_warning "Need sudo permissions to install to ${INSTALL_DIR}"
-        sudo mv "$BINARY_FILE" "${INSTALL_DIR}/${BINARY_NAME}"
-    fi
-
-    # Cleanup
-    cd - > /dev/null
-    rm -rf "$TMP_DIR"
-
-    print_info "Installation complete!"
+    run_root install -m 0755 "${tmp_dir}/${binary_file}" "${INSTALL_DIR}/${BINARY_NAME}"
+    print_info "Installed binary to ${INSTALL_DIR}/${BINARY_NAME}"
 }
 
-# Verify installation
 verify_installation() {
-    if command -v "$BINARY_NAME" &> /dev/null; then
-        VERSION_OUTPUT=$("$BINARY_NAME" --version 2>&1 || echo "unknown")
-        print_info "Successfully installed: ${BINARY_NAME}"
-        print_info "Version: ${VERSION_OUTPUT}"
+    if have_command "$BINARY_NAME"; then
+        print_info "Installed: $($BINARY_NAME --version 2>/dev/null || echo unknown)"
     else
-        print_error "Installation verification failed"
+        print_error "Installation verification failed."
         exit 1
+    }
+}
+
+ensure_directory() {
+    local dir="$1"
+    run_root mkdir -p "$dir"
+}
+
+linux_prepare_user() {
+    if id -u yaat >/dev/null 2>&1; then
+        return
+    fi
+    print_info "Creating system user 'yaat'"
+    run_root useradd --system --home /var/lib/yaat --shell /usr/sbin/nologin yaat
+}
+
+linux_setup_directories() {
+    local config_dir="/etc/yaat"
+    local state_dir="/var/lib/yaat"
+    local log_dir="/var/log/yaat"
+
+    ensure_directory "$config_dir"
+    ensure_directory "$state_dir"
+    ensure_directory "$log_dir"
+
+    run_root chown yaat:yaat "$state_dir"
+    run_root chown yaat:yaat "$log_dir"
+    run_root chmod 0750 "$state_dir"
+    run_root chmod 0750 "$log_dir"
+}
+
+linux_install_service() {
+    if ! have_command systemctl; then
+        print_warning "systemd not detected; skipping service installation."
+        return
+    fi
+
+    if ! prompt_yes_no "Install systemd service for YAAT Sidecar? [Y/n] " "y"; then
+        print_info "Skipping systemd service installation."
+        return
+    fi
+
+    linux_prepare_user
+    linux_setup_directories
+
+    local unit_file="/etc/systemd/system/yaat-sidecar.service"
+    local unit_contents="[Unit]
+Description=YAAT Sidecar - Backend Monitoring Agent
+Documentation=https://yaat.io/docs
+After=network.target
+
+[Service]
+Type=simple
+User=yaat
+Group=yaat
+WorkingDirectory=/var/lib/yaat
+ExecStart=${INSTALL_DIR}/${BINARY_NAME} --config /etc/yaat/yaat.yaml --log-file /var/log/yaat/sidecar.log
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=10s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/yaat /var/lib/yaat /etc/yaat
+CapabilityBoundingSet=
+LimitNOFILE=65536
+MemoryMax=512M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target"
+
+    print_info "Installing systemd unit: ${unit_file}"
+    if [ "$(id -u)" -eq 0 ]; then
+        printf '%s\n' "$unit_contents" > "$unit_file"
+    else
+        printf '%s\n' "$unit_contents" | sudo tee "$unit_file" >/dev/null
+    fi
+
+    run_root systemctl daemon-reload
+
+    if prompt_yes_no "Enable YAAT Sidecar to start on boot? [Y/n] " "y"; then
+        run_root systemctl enable yaat-sidecar
+        print_info "Service enabled. Start it after configuring credentials:"
+        echo "  sudo -u yaat ${BINARY_NAME} --setup --config /etc/yaat/yaat.yaml"
+        echo "  sudo systemctl start yaat-sidecar"
+    else
+        print_info "Service installed but not enabled. Start manually once configured."
     fi
 }
 
-# Print next steps
+darwin_setup_directories() {
+    local config_dir="/usr/local/etc/yaat"
+    local state_dir="/usr/local/var/lib/yaat"
+    local log_dir="/usr/local/var/log/yaat"
+
+    ensure_directory "$config_dir"
+    ensure_directory "$state_dir"
+    ensure_directory "$log_dir"
+
+    run_root chown "$(id -un)":staff "$state_dir" "$log_dir"
+    run_root chmod 0750 "$state_dir" "$log_dir"
+}
+
+darwin_install_launchd() {
+    if ! have_command launchctl; then
+        print_warning "launchctl not available; skipping launchd installation."
+        return
+    fi
+
+    if ! prompt_yes_no "Install launchd daemon for YAAT Sidecar? [Y/n] " "y"; then
+        print_info "Skipping launchd installation."
+        return
+    fi
+
+    darwin_setup_directories
+
+    local plist_path="/Library/LaunchDaemons/io.yaat.sidecar.plist"
+    local plist_contents="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+<plist version=\"1.0\">
+<dict>
+    <key>Label</key>
+    <string>io.yaat.sidecar</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${INSTALL_DIR}/${BINARY_NAME}</string>
+        <string>--config</string>
+        <string>/usr/local/etc/yaat/yaat.yaml</string>
+        <string>--log-file</string>
+        <string>/usr/local/var/log/yaat/sidecar.log</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/usr/local/var/lib/yaat</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/usr/local/var/log/yaat/sidecar.stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/usr/local/var/log/yaat/sidecar.stderr.log</string>
+</dict>
+</plist>"
+
+    print_info "Installing launchd plist: ${plist_path}"
+    if [ "$(id -u)" -eq 0 ]; then
+        printf '%s\n' "$plist_contents" > "$plist_path"
+    else
+        printf '%s\n' "$plist_contents" | sudo tee "$plist_path" >/dev/null
+    fi
+
+    run_root chmod 0644 "$plist_path"
+
+    if prompt_yes_no "Load YAAT Sidecar daemon with launchctl now? [Y/n] " "n"; then
+        run_root launchctl load -w "$plist_path"
+        print_info "Daemon loaded. Configure credentials via:"
+        echo "  sudo ${BINARY_NAME} --setup --config /usr/local/etc/yaat/yaat.yaml"
+        echo "  sudo launchctl kickstart -k system/io.yaat.sidecar"
+    else
+        print_info "Daemon installed but not loaded. Configure and load manually when ready."
+    fi
+}
+
+post_install() {
+    case "$OS" in
+        linux) linux_install_service ;;
+        darwin) darwin_install_launchd ;;
+    esac
+}
+
 print_next_steps() {
     echo ""
     echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}  YAAT Sidecar installed successfully!${NC}"
+    echo -e "${GREEN}  YAAT Sidecar installation complete${NC}"
     echo -e "${GREEN}========================================${NC}"
     echo ""
-    echo "Next steps:"
+    case "$OS" in
+        linux)
+            echo "Configuration (run as the service user):"
+            echo "  sudo -u yaat ${BINARY_NAME} --setup --config /etc/yaat/yaat.yaml"
+            echo ""
+            echo "Start service:"
+            echo "  sudo systemctl start yaat-sidecar"
+            ;;
+        darwin)
+            echo "Configuration:"
+            echo "  sudo ${BINARY_NAME} --setup --config /usr/local/etc/yaat/yaat.yaml"
+            echo ""
+            echo "Start daemon:"
+            echo "  sudo launchctl load -w /Library/LaunchDaemons/io.yaat.sidecar.plist"
+            ;;
+    esac
     echo ""
-    echo "1. Launch the interactive setup wizard:"
-    echo "   yaat-sidecar --setup"
-    echo ""
-    echo "   The wizard will prompt for your API key, auto-detect log files,"
-    echo "   and optionally start the sidecar in the background."
+    echo "Dashboard & TUI:"
+    echo "  ${BINARY_NAME} --dashboard"
     echo ""
     echo "Useful commands:"
-    echo "   yaat-sidecar --status     # check background service status"
-    echo "   yaat-sidecar --stop       # stop the background service"
-    echo "   yaat-sidecar --update     # download the latest release"
-    echo "   yaat-sidecar --uninstall  # remove the sidecar completely"
+    echo "  ${BINARY_NAME} --status"
+    echo "  ${BINARY_NAME} --test"
+    echo "  ${BINARY_NAME} --update"
+    echo "  ${BINARY_NAME} --uninstall"
     echo ""
     echo "Documentation: https://github.com/${REPO}"
     echo ""
 }
 
-# Main installation flow
 main() {
     print_info "Starting YAAT Sidecar installation..."
-
     detect_platform
     get_latest_version
     install_binary
     verify_installation
+    post_install()
     print_next_steps
 }
 
-main
+main "$@"

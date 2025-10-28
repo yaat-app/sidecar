@@ -9,7 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/yaat/sidecar/internal/buffer"
+	"github.com/yaat-app/sidecar/internal/buffer"
+	"github.com/yaat-app/sidecar/internal/scrubber"
 )
 
 // Proxy is an HTTP reverse proxy that captures requests/responses
@@ -111,16 +112,17 @@ func (p *Proxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Create span event
 	event := buffer.Event{
-		"service_name": p.serviceName,
-		"event_id":     uuid.New().String(),
-		"timestamp":    startTime.UTC().Format(time.RFC3339),
-		"event_type":   "span",
-		"environment":  p.environment,
-		"trace_id":     traceID,
-		"span_id":      spanID,
-		"operation":    fmt.Sprintf("%s %s", r.Method, r.URL.Path),
-		"duration_ms":  float64(duration.Milliseconds()),
-		"status_code":  resp.StatusCode,
+		"service_name":   p.serviceName,
+		"event_id":       uuid.New().String(),
+		"timestamp":      startTime.UTC().Format(time.RFC3339),
+		"event_type":     "span",
+		"environment":    p.environment,
+		"trace_id":       traceID,
+		"span_id":        spanID,
+		"parent_span_id": "", // Root span from proxy
+		"operation":      fmt.Sprintf("%s %s", r.Method, r.URL.Path),
+		"duration_ms":    float64(duration.Milliseconds()),
+		"status_code":    resp.StatusCode,
 		"tags": map[string]string{
 			"method": r.Method,
 			"path":   r.URL.Path,
@@ -129,7 +131,9 @@ func (p *Proxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Add to buffer
-	p.buffer.Add(event)
+	if scrubber.Apply(event) {
+		p.buffer.Add(event)
+	}
 
 	log.Printf("[Proxy] %s %s -> %d (%dms)", r.Method, r.URL.Path, resp.StatusCode, duration.Milliseconds())
 }

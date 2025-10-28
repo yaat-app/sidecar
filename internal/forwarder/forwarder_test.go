@@ -1,13 +1,20 @@
 package forwarder
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
-	"github.com/yaat/sidecar/internal/buffer"
+	"github.com/yaat-app/sidecar/internal/buffer"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
+}
 
 func TestNew(t *testing.T) {
 	endpoint := "https://api.test.com/ingest"
@@ -43,66 +50,65 @@ func TestSendEmpty(t *testing.T) {
 }
 
 func TestSendSuccess(t *testing.T) {
-	// Create mock server
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify request
-		if r.Method != "POST" {
-			t.Errorf("Expected POST request, got %s", r.Method)
-		}
+	f := New("https://example.test/ingest", "test-key")
 
-		if r.Header.Get("Content-Type") != "application/json" {
-			t.Error("Expected Content-Type: application/json")
-		}
+	f.SetHTTPClient(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.Method != http.MethodPost {
+				t.Fatalf("expected POST request, got %s", req.Method)
+			}
+			if req.Header.Get("Content-Type") != "application/json" {
+				t.Fatalf("expected Content-Type application/json, got %s", req.Header.Get("Content-Type"))
+			}
+			if req.Header.Get("Authorization") != "Bearer test-key" {
+				t.Fatalf("unexpected Authorization header: %s", req.Header.Get("Authorization"))
+			}
 
-		authHeader := r.Header.Get("Authorization")
-		if authHeader != "Bearer test-key" {
-			t.Errorf("Expected Authorization: Bearer test-key, got %s", authHeader)
-		}
+			payload, err := io.ReadAll(req.Body)
+			if err != nil {
+				return nil, err
+			}
+			_ = req.Body.Close()
 
-		// Parse request body
-		var payload map[string]interface{}
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			t.Errorf("Failed to decode request body: %v", err)
-		}
+			var decoded map[string]interface{}
+			if err := json.Unmarshal(payload, &decoded); err != nil {
+				return nil, err
+			}
+			if events, ok := decoded["events"].([]interface{}); !ok || len(events) != 2 {
+				t.Fatalf("expected 2 events, got %v", decoded["events"])
+			}
 
-		// Verify events are present
-		events, ok := payload["events"].([]interface{})
-		if !ok || len(events) != 2 {
-			t.Errorf("Expected 2 events in payload, got %v", events)
-		}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(bytes.NewReader([]byte(`{"status":"ok"}`))),
+			}, nil
+		}),
+	})
 
-		// Return success
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"status": "ok"}`))
-	}))
-	defer server.Close()
-
-	// Create forwarder
-	f := New(server.URL, "test-key")
-
-	// Send events
 	events := []buffer.Event{
 		{"id": "1", "service_name": "test"},
 		{"id": "2", "service_name": "test"},
 	}
 
-	err := f.Send(events)
-
-	if err != nil {
-		t.Errorf("Expected no error, got: %v", err)
+	if err := f.Send(events); err != nil {
+		t.Errorf("expected no error, got: %v", err)
 	}
 }
 
 func TestSendUnauthorized(t *testing.T) {
-	// Create mock server that returns 401
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		w.Write([]byte(`{"error": "Invalid API key"}`))
-	}))
-	defer server.Close()
+	f := New("https://example.test/ingest", "invalid-key")
 
-	f := New(server.URL, "invalid-key")
-	events := []buffer.Event{{"id": "1"}}
+	f.SetHTTPClient(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusUnauthorized,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(bytes.NewReader([]byte(`{"error":"Invalid API key"}`))),
+			}, nil
+		}),
+	})
+	events := []buffer.Event{{"id": "1", "service_name": "test"}}
 
 	err := f.Send(events)
 
@@ -116,15 +122,17 @@ func TestSendUnauthorized(t *testing.T) {
 }
 
 func TestSendServerError(t *testing.T) {
-	// Create mock server that returns 500
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"error": "Server error"}`))
-	}))
-	defer server.Close()
-
-	f := New(server.URL, "test-key")
-	events := []buffer.Event{{"id": "1"}}
+	f := New("https://example.test/ingest", "test-key")
+	f.SetHTTPClient(&http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusInternalServerError,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(bytes.NewReader([]byte(`{"error":"Server error"}`))),
+			}, nil
+		}),
+	})
+	events := []buffer.Event{{"id": "1", "service_name": "test"}}
 
 	err := f.Send(events)
 

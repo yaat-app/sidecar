@@ -5,13 +5,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/yaat/sidecar/internal/config"
-	"github.com/yaat/sidecar/internal/daemon"
-	"github.com/yaat/sidecar/internal/forwarder"
+	"github.com/yaat-app/sidecar/internal/buffer"
+	"github.com/yaat-app/sidecar/internal/config"
+	"github.com/yaat-app/sidecar/internal/daemon"
+	"github.com/yaat-app/sidecar/internal/detection"
+	"github.com/yaat-app/sidecar/internal/forwarder"
+	"github.com/yaat-app/sidecar/internal/state"
 )
 
 // Run executes the interactive setup wizard.
@@ -79,6 +83,18 @@ func Run(configPath string) error {
 	}
 	cfg.Logs = selectedLogs
 
+	envDetect := detection.DetectEnvironment()
+	if envDetect != nil && envDetect.Journald {
+		fmt.Println()
+		if promptYesNo(reader, "Stream from systemd-journald?", false) {
+			unit := promptString(reader, "Filter by systemd unit (leave empty for all)", "")
+			cfg.Logs = append(cfg.Logs, config.LogConfig{
+				Path:   unit,
+				Format: "journald",
+			})
+		}
+	}
+
 	fmt.Println()
 	cfg.BufferSize = promptInt(reader, "Buffer size", cfg.BufferSize)
 	cfg.FlushInterval = promptDuration(reader, "Flush interval", cfg.FlushInterval)
@@ -91,11 +107,29 @@ func Run(configPath string) error {
 
 	fmt.Printf("✓ Configuration saved to %s\n", cfg.SourcePath)
 
+	if err := state.RecordConfig(cfg.SourcePath); err != nil {
+		fmt.Printf("⚠️  Could not persist setup state: %v\n", err)
+	}
+
 	if promptYesNo(reader, "Test API connectivity now?", false) {
-		if err := testAPI(cfg); err != nil {
+		report, err := testAPI(cfg)
+		var (
+			latency time.Duration
+			events  []buffer.Event
+		)
+		if report != nil {
+			latency = report.Latency
+			events = report.Events
+		}
+
+		if err != nil {
 			fmt.Printf("✗ API test failed: %v\n", err)
 		} else {
-			fmt.Println("✓ API connection successful")
+			fmt.Printf("✓ API connection successful (%d events in %v)\n", len(events), latency.Truncate(time.Millisecond))
+		}
+
+		if recordErr := state.RecordTestOutcome(cfg.APIEndpoint, cfg.ServiceName, cfg.Environment, events, latency, err); recordErr != nil {
+			fmt.Printf("⚠️  Could not update test state: %v\n", recordErr)
 		}
 	}
 
@@ -126,7 +160,7 @@ func bootstrapConfig(path string) *config.Config {
 	}
 
 	cfg := &config.Config{
-		APIEndpoint: "https://yaat.io/v1/ingest",
+		APIEndpoint: "https://yaat.io/api/v1/ingest",
 		Environment: detectEnvironment(),
 		BufferSize:  1000,
 		FlushInterval: func() string {
@@ -182,26 +216,74 @@ func detectServiceName() string {
 }
 
 func discoverLogCandidates() []logCandidate {
-	candidates := []logCandidate{
-		{Path: "/var/log/nginx/access.log", Format: "nginx", Description: "Nginx access log"},
-		{Path: "/var/log/nginx/error.log", Format: "nginx", Description: "Nginx error log"},
-		{Path: "/var/log/httpd/access_log", Format: "nginx", Description: "Apache access log"},
-		{Path: "/var/log/syslog", Format: "json", Description: "System log"},
-		{Path: "./logs/app.log", Format: "django", Description: "Local app log"},
-		{Path: "./logs/server.log", Format: "json", Description: "Local server log"},
-	}
+	env := detection.DetectEnvironment()
+	seen := make(map[string]struct{})
+	var candidates []logCandidate
 
-	available := make([]logCandidate, 0, len(candidates))
-	for _, cand := range candidates {
-		if fileExists(cand.Path) {
-			available = append(available, logCandidate{
-				Path:        expandPath(cand.Path),
-				Format:      cand.Format,
-				Description: cand.Description,
+	if env != nil {
+		for _, lf := range env.LogFiles {
+			path := expandPath(lf.Path)
+			if path == "" {
+				continue
+			}
+			if _, ok := seen[path]; ok {
+				continue
+			}
+			seen[path] = struct{}{}
+
+			format := strings.ToLower(lf.SuggestedFormat)
+			if format == "" {
+				format = "json"
+			}
+
+			description := strings.ToUpper(format) + " log"
+			if !lf.Readable {
+				description += " (permission required)"
+			}
+			if lf.SuggestedFormat == "" {
+				description = "Detected log file"
+			}
+
+			candidates = append(candidates, logCandidate{
+				Path:        path,
+				Format:      format,
+				Description: description,
 			})
 		}
 	}
-	return available
+
+	if len(candidates) == 0 {
+		fallback := []logCandidate{
+			{Path: "/var/log/nginx/access.log", Format: "nginx", Description: "Nginx access log"},
+			{Path: "/var/log/nginx/error.log", Format: "nginx", Description: "Nginx error log"},
+			{Path: "/var/log/apache2/access.log", Format: "apache", Description: "Apache access log"},
+			{Path: "/var/log/httpd/access_log", Format: "apache", Description: "Apache access log"},
+			{Path: "/var/log/syslog", Format: "json", Description: "System log"},
+			{Path: "./logs/app.log", Format: "django", Description: "Local app log"},
+			{Path: "./logs/server.log", Format: "json", Description: "Local server log"},
+		}
+
+		for _, cand := range fallback {
+			path := expandPath(cand.Path)
+			if _, ok := seen[path]; ok {
+				continue
+			}
+			if fileExists(path) {
+				seen[path] = struct{}{}
+				candidates = append(candidates, logCandidate{
+					Path:        path,
+					Format:      cand.Format,
+					Description: cand.Description,
+				})
+			}
+		}
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].Path < candidates[j].Path
+	})
+
+	return candidates
 }
 
 func promptAPIKey(reader *bufio.Reader, current string) string {
@@ -297,9 +379,14 @@ func promptLogFormat(reader *bufio.Reader) string {
 	}
 }
 
-func testAPI(cfg *config.Config) error {
-	forwarder := forwarder.New(cfg.APIEndpoint, cfg.APIKey)
-	return forwarder.Test()
+func testAPI(cfg *config.Config) (*forwarder.TestReport, error) {
+	opts := forwarder.Options{
+		BatchSize:     cfg.Delivery.BatchSize,
+		Compress:      cfg.Delivery.Compress,
+		MaxBatchBytes: cfg.Delivery.MaxBatchBytes,
+	}
+	fwd := forwarder.NewWithOptions(cfg.APIEndpoint, cfg.APIKey, opts)
+	return fwd.Test(cfg.ServiceName, cfg.Environment)
 }
 
 func fileExists(path string) bool {

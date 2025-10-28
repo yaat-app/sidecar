@@ -26,18 +26,65 @@ type LogConfig struct {
 
 // Config represents the sidecar configuration
 type Config struct {
-	APIKey        string      `yaml:"api_key"`
-	ServiceName   string      `yaml:"service_name"`
-	Environment   string      `yaml:"environment"`
-	Proxy         ProxyConfig `yaml:"proxy"`
-	Logs          []LogConfig `yaml:"logs"`
-	BufferSize    int         `yaml:"buffer_size"`
-	FlushInterval string      `yaml:"flush_interval"`
-	APIEndpoint   string      `yaml:"api_endpoint"`
+	APIKey        string          `yaml:"api_key"`
+	ServiceName   string          `yaml:"service_name"`
+	Environment   string          `yaml:"environment"`
+	Proxy         ProxyConfig     `yaml:"proxy"`
+	Logs          []LogConfig     `yaml:"logs"`
+	BufferSize    int             `yaml:"buffer_size"`
+	FlushInterval string          `yaml:"flush_interval"`
+	APIEndpoint   string          `yaml:"api_endpoint"`
+	Delivery      DeliveryConfig  `yaml:"delivery"`
+	Metrics       MetricsConfig   `yaml:"metrics"`
+	Scrubbing     ScrubbingConfig `yaml:"scrubbing"`
 
 	// Parsed flush interval
 	FlushIntervalDuration time.Duration `yaml:"-"`
 	SourcePath            string        `yaml:"-"`
+}
+
+// DeliveryConfig tunes forwarding behaviour.
+type DeliveryConfig struct {
+	BatchSize                   int           `yaml:"batch_size"`            // max events per HTTP request
+	Compress                    bool          `yaml:"compress"`              // gzip payloads
+	MaxBatchBytes               int           `yaml:"max_batch_bytes"`       // optional soft limit (0 disables)
+	QueueRetention              string        `yaml:"queue_retention"`       // e.g. "24h", "0s" disables
+	DeadLetterRetention         string        `yaml:"dead_letter_retention"` // e.g. "168h"
+	QueueRetentionDuration      time.Duration `yaml:"-"`
+	DeadLetterRetentionDuration time.Duration `yaml:"-"`
+}
+
+// MetricsConfig controls host metrics collection.
+type MetricsConfig struct {
+	Enabled          bool              `yaml:"enabled"`
+	Interval         string            `yaml:"interval"`
+	Tags             map[string]string `yaml:"tags,omitempty"`
+	IntervalDuration time.Duration     `yaml:"-"`
+	StatsD           StatsDConfig      `yaml:"statsd"`
+}
+
+// StatsDConfig controls the embedded StatsD/dogstatsd listener.
+type StatsDConfig struct {
+	Enabled    bool              `yaml:"enabled"`
+	ListenAddr string            `yaml:"listen_addr"`
+	Namespace  string            `yaml:"namespace"`
+	Tags       map[string]string `yaml:"tags,omitempty"`
+}
+
+// ScrubbingConfig controls regex-based redaction/drop rules.
+type ScrubbingConfig struct {
+	Enabled bool        `yaml:"enabled"`
+	Rules   []ScrubRule `yaml:"rules"`
+}
+
+// ScrubRule describes an individual regex replacement/drop instruction.
+type ScrubRule struct {
+	Name        string   `yaml:"name"`
+	Description string   `yaml:"description,omitempty"`
+	Pattern     string   `yaml:"pattern"`
+	Replacement string   `yaml:"replacement,omitempty"`
+	Fields      []string `yaml:"fields,omitempty"`
+	Drop        bool     `yaml:"drop,omitempty"`
 }
 
 // LoadConfig loads configuration from a YAML file
@@ -108,10 +155,44 @@ logs:
 buffer_size: 1000           # Number of events to buffer before flushing
 flush_interval: "10s"       # How often to send events (e.g., 10s, 1m, 30s)
 
+# Delivery tuning
+delivery:
+  batch_size: 500           # Max events per HTTP request
+  compress: true            # Gzip compress payloads
+  max_batch_bytes: 0        # Optional soft limit in bytes (0 to disable)
+  queue_retention: "24h"    # How long to keep persisted batches before cleanup
+  dead_letter_retention: "168h" # Retention for dead-letter batches
+
+# Host metrics
+metrics:
+  enabled: false            # Set to true to publish host metrics
+  interval: "30s"           # Sampling interval
+  tags: {}                  # Optional static tags applied to host metrics
+  statsd:
+    enabled: false          # Enable embedded StatsD/dogstatsd listener
+    listen_addr: ":8125"   # UDP address to listen on (host:port or :port)
+    namespace: ""          # Optional prefix added to metric names
+    tags: {}                # Additional tags applied to all StatsD metrics
+
+# Data scrubbing (mask sensitive values before sending to YAAT)
+scrubbing:
+  enabled: true
+  rules:
+    - name: "Mask Authorization bearer tokens"
+      description: "Replaces Bearer tokens in log messages"
+      pattern: "(?i)(authorization:?\\s*bearer\\s+)[A-Za-z0-9._~-]+"
+      replacement: "$1[REDACTED]"
+      fields: ["message", "stacktrace", "tags.authorization"]
+    - name: "Mask email addresses"
+      description: "Removes email-like patterns from payloads"
+      pattern: "(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}"
+      replacement: "[EMAIL]"
+      fields: ["message", "stacktrace", "tags.*"]
+
 # YAAT API endpoint (required)
-# Production: https://yaat.io/v1/ingest
-# Staging: https://staging.yaat.io/v1/ingest
-api_endpoint: "https://yaat.io/v1/ingest"
+# Production: https://yaat.io/api/v1/ingest
+# Staging: https://staging.yaat.io/api/v1/ingest
+api_endpoint: "https://yaat.io/api/v1/ingest"
 `
 
 	dir := filepath.Dir(path)
@@ -191,6 +272,52 @@ func (cfg *Config) applyDefaults() error {
 	if cfg.FlushInterval == "" {
 		cfg.FlushInterval = "10s"
 	}
+	if cfg.Delivery.BatchSize <= 0 {
+		cfg.Delivery.BatchSize = 500
+	}
+	if cfg.Delivery.MaxBatchBytes < 0 {
+		cfg.Delivery.MaxBatchBytes = 0
+	}
+	if cfg.Delivery.QueueRetention == "" {
+		cfg.Delivery.QueueRetention = "24h"
+	}
+	if cfg.Delivery.QueueRetention != "" {
+		if dur, err := time.ParseDuration(cfg.Delivery.QueueRetention); err == nil {
+			cfg.Delivery.QueueRetentionDuration = dur
+		} else {
+			return fmt.Errorf("invalid delivery.queue_retention: %w", err)
+		}
+	}
+	if cfg.Delivery.DeadLetterRetention == "" {
+		cfg.Delivery.DeadLetterRetention = "168h"
+	}
+	if cfg.Delivery.DeadLetterRetention != "" {
+		if dur, err := time.ParseDuration(cfg.Delivery.DeadLetterRetention); err == nil {
+			cfg.Delivery.DeadLetterRetentionDuration = dur
+		} else {
+			return fmt.Errorf("invalid delivery.dead_letter_retention: %w", err)
+		}
+	}
+	if cfg.Metrics.Enabled {
+		if cfg.Metrics.Interval == "" {
+			cfg.Metrics.Interval = "30s"
+		}
+		if cfg.Metrics.StatsD.ListenAddr == "" {
+			cfg.Metrics.StatsD.ListenAddr = ":8125"
+		}
+	}
+	if cfg.Metrics.Interval != "" {
+		dur, err := time.ParseDuration(cfg.Metrics.Interval)
+		if err != nil {
+			return fmt.Errorf("invalid metrics.interval: %w", err)
+		}
+		cfg.Metrics.IntervalDuration = dur
+	}
+	for i := range cfg.Scrubbing.Rules {
+		if cfg.Scrubbing.Rules[i].Replacement == "" && !cfg.Scrubbing.Rules[i].Drop {
+			cfg.Scrubbing.Rules[i].Replacement = "[REDACTED]"
+		}
+	}
 	duration, err := time.ParseDuration(cfg.FlushInterval)
 	if err != nil {
 		return fmt.Errorf("invalid flush_interval: %w", err)
@@ -249,4 +376,31 @@ func uniquePaths(paths []string) []string {
 		unique = append(unique, clean)
 	}
 	return unique
+}
+
+// RecommendedScrubRules returns a curated set of baseline redaction rules.
+func RecommendedScrubRules() []ScrubRule {
+	return []ScrubRule{
+		{
+			Name:        "Mask Authorization bearer tokens",
+			Description: "Replaces Bearer tokens in log messages",
+			Pattern:     `(?i)(authorization:?\s*bearer\s+)[A-Za-z0-9._~-]+`,
+			Replacement: `$1[REDACTED]`,
+			Fields:      []string{"message", "stacktrace", "tags.authorization"},
+		},
+		{
+			Name:        "Mask email addresses",
+			Description: "Removes email-like patterns from payloads",
+			Pattern:     `(?i)[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}`,
+			Replacement: `[EMAIL]`,
+			Fields:      []string{"message", "stacktrace", "tags.*"},
+		},
+		{
+			Name:        "Mask UUID-like identifiers",
+			Description: "Scrubs UUID/GUID values often used as user identifiers",
+			Pattern:     `(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`,
+			Replacement: `[UUID]`,
+			Fields:      []string{"message", "stacktrace", "tags.*"},
+		},
+	}
 }
