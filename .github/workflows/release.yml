@@ -13,11 +13,12 @@ jobs:
   test:
     name: Run Tests
     runs-on: ubuntu-latest
-    env:
-      CGO_ENABLED: 0
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libsystemd-dev
 
       - name: Set up Go
         uses: actions/setup-go@v5
