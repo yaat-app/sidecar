@@ -27,6 +27,7 @@ const (
 	viewEvents
 	viewTest
 	viewSetup
+	viewUninstall
 )
 
 // Dashboard model
@@ -62,6 +63,11 @@ type Dashboard struct {
 
 	// Config editor
 	configEditor *ConfigEditor
+
+	// Uninstall state
+	uninstallConfirm bool
+	uninstallResult  string
+	uninstallWarnings []string
 
 	// Quit flag
 	quitting bool
@@ -203,6 +209,49 @@ func (m Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.currentView = viewTest
 				m.runTests()
+			}
+			return m, nil
+
+		case "u":
+			if m.currentView == viewUninstall {
+				m.currentView = viewDashboard
+				m.message = ""
+				m.uninstallConfirm = false
+				m.uninstallResult = ""
+				m.uninstallWarnings = nil
+			} else {
+				m.currentView = viewUninstall
+				m.uninstallConfirm = false
+				m.uninstallResult = ""
+				m.uninstallWarnings = nil
+			}
+			return m, nil
+
+		case "y", "Y":
+			if m.currentView == viewUninstall && !m.uninstallConfirm {
+				m.uninstallConfirm = true
+				warnings, err := daemon.Uninstall()
+				if err != nil {
+					m.uninstallWarnings = append(warnings, err.Error())
+					m.uninstallResult = "error"
+				} else {
+					m.uninstallWarnings = warnings
+					if len(warnings) == 0 {
+						m.uninstallResult = "success"
+					} else {
+						m.uninstallResult = "partial"
+					}
+				}
+			}
+			return m, nil
+
+		case "n", "N":
+			if m.currentView == viewUninstall {
+				m.currentView = viewDashboard
+				m.message = ""
+				m.uninstallConfirm = false
+				m.uninstallResult = ""
+				m.uninstallWarnings = nil
 			}
 			return m, nil
 
@@ -362,6 +411,8 @@ func (m Dashboard) View() string {
 			return m.setupWizard.View()
 		}
 		return m.renderDashboard()
+	case viewUninstall:
+		return m.renderUninstallView()
 	default:
 		return m.renderDashboard()
 	}
@@ -669,6 +720,51 @@ func (m Dashboard) renderTestView() string {
 	return BaseStyle.Render(header+content.String()) + "\n"
 }
 
+// renderUninstallView renders the uninstall confirmation and results
+func (m Dashboard) renderUninstallView() string {
+	header := TitleStyle.Render("Uninstall YAAT Sidecar") + "\n\n"
+
+	var content strings.Builder
+
+	if m.uninstallResult == "" {
+		// Show confirmation prompt
+		content.WriteString(WarningStyle.Render("⚠ WARNING: This will completely remove YAAT Sidecar") + "\n\n")
+		content.WriteString(MutedStyle.Render("The following will be removed:") + "\n")
+		content.WriteString(MutedStyle.Render("  • Binary: /usr/local/bin/yaat-sidecar") + "\n")
+		content.WriteString(MutedStyle.Render("  • Configuration files") + "\n")
+		content.WriteString(MutedStyle.Render("  • State and queue directories") + "\n")
+		content.WriteString(MutedStyle.Render("  • System directories (/var/lib/yaat, /var/log/yaat)") + "\n")
+		content.WriteString(MutedStyle.Render("  • Launch daemon/agent (systemd service or launchd plist)") + "\n\n")
+		content.WriteString(ErrorStyle.Render("This action cannot be undone!") + "\n\n")
+		content.WriteString(MutedStyle.Render("Are you sure you want to uninstall? ") + "\n")
+		content.WriteString(KeyStyle.Render("y") + MutedStyle.Render(" Yes, uninstall  ") + "\n")
+		content.WriteString(KeyStyle.Render("n") + MutedStyle.Render(" No, cancel") + "\n")
+	} else {
+		// Show uninstall results
+		if m.uninstallResult == "success" {
+			content.WriteString(SuccessStyle.Render("✓ Uninstall completed successfully") + "\n\n")
+			content.WriteString(MutedStyle.Render("YAAT Sidecar has been completely removed from your system.") + "\n")
+		} else if m.uninstallResult == "error" {
+			content.WriteString(ErrorStyle.Render("✗ Uninstall failed") + "\n\n")
+			content.WriteString(MutedStyle.Render("Fatal errors occurred during uninstallation:") + "\n\n")
+			for _, warning := range m.uninstallWarnings {
+				content.WriteString(ErrorStyle.Render("  • "+warning) + "\n")
+			}
+			content.WriteString("\n" + MutedStyle.Render("Please review the errors above and try again.") + "\n")
+		} else {
+			content.WriteString(WarningStyle.Render("⚠ Uninstall completed with warnings") + "\n\n")
+			content.WriteString(MutedStyle.Render("Some items could not be removed:") + "\n\n")
+			for _, warning := range m.uninstallWarnings {
+				content.WriteString(WarningStyle.Render("  • "+warning) + "\n")
+			}
+			content.WriteString("\n" + MutedStyle.Render("You may need to remove these manually with appropriate permissions.") + "\n")
+		}
+		content.WriteString("\n" + MutedStyle.Render("Press 'q' to exit") + "\n")
+	}
+
+	return BaseStyle.Render(header+content.String()) + "\n"
+}
+
 // runTests runs actual configuration tests
 func (m *Dashboard) runTests() {
 	m.testResults = []TestResult{}
@@ -787,6 +883,7 @@ func renderHelp() string {
 		{"c", "Config"},
 		{"e", "Events"},
 		{"t", "Test"},
+		{"u", "Uninstall"},
 		{"q", "Quit"},
 	}
 

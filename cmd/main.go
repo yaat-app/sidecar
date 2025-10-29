@@ -119,11 +119,16 @@ func main() {
 
 	// Handle uninstall flag
 	if *uninstall || *uninstallAlias {
-		if err := daemon.Uninstall(); err != nil {
+		warnings, err := daemon.Uninstall()
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "Uninstall failed: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Println("✓ YAAT Sidecar uninstalled successfully")
+		if len(warnings) > 0 {
+			fmt.Println("✓ YAAT Sidecar uninstalled with warnings")
+		} else {
+			fmt.Println("✓ YAAT Sidecar uninstalled successfully")
+		}
 		os.Exit(0)
 	}
 

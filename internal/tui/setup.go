@@ -93,6 +93,25 @@ func NewSetupWizard() *SetupWizard {
 }
 
 func (s *SetupWizard) Update(msg tea.Msg) (*SetupWizard, tea.Cmd) {
+	// Handle text input steps FIRST (before global shortcuts)
+	var cmd tea.Cmd
+	if s.step == stepAPIKey {
+		// Let text input handle all keys except Enter to proceed
+		if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "enter" {
+			return s.nextStep()
+		}
+		s.apiKey, cmd = s.apiKey.Update(msg)
+		return s, cmd
+	} else if s.step == stepServiceName {
+		// Let text input handle all keys except Enter to proceed
+		if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "enter" {
+			return s.nextStep()
+		}
+		s.serviceName, cmd = s.serviceName.Update(msg)
+		return s, cmd
+	}
+
+	// Handle global shortcuts for non-text-input steps
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -140,16 +159,6 @@ func (s *SetupWizard) Update(msg tea.Msg) (*SetupWizard, tea.Cmd) {
 				s.scrubSelected[s.scrubCursor] = !s.scrubSelected[s.scrubCursor]
 			}
 		}
-	}
-
-	// Update text inputs
-	var cmd tea.Cmd
-	if s.step == stepAPIKey {
-		s.apiKey, cmd = s.apiKey.Update(msg)
-		return s, cmd
-	} else if s.step == stepServiceName {
-		s.serviceName, cmd = s.serviceName.Update(msg)
-		return s, cmd
 	}
 
 	return s, nil

@@ -102,14 +102,31 @@ install_binary() {
     print_info "Downloading ${download_url}"
     local tmp_dir
     tmp_dir=$(mktemp -d)
-    trap 'rm -rf "${tmp_dir}"' EXIT
 
-    (cd "$tmp_dir" && curl -fsSL "$download_url" -o "$archive_file")
+    # Download and extract
+    (cd "$tmp_dir" && curl -fsSL "$download_url" -o "$archive_file") || {
+        rm -rf "${tmp_dir}"
+        return 1
+    }
+
     print_info "Extracting archive..."
-    (cd "$tmp_dir" && tar -xzf "$archive_file")
+    (cd "$tmp_dir" && tar -xzf "$archive_file") || {
+        rm -rf "${tmp_dir}"
+        return 1
+    }
 
+    # Install binary
     run_root install -m 0755 "${tmp_dir}/${binary_file}" "${INSTALL_DIR}/${BINARY_NAME}"
-    print_info "Installed binary to ${INSTALL_DIR}/${BINARY_NAME}"
+    local install_result=$?
+
+    # Clean up temp directory
+    rm -rf "${tmp_dir}"
+
+    if [ $install_result -eq 0 ]; then
+        print_info "Installed binary to ${INSTALL_DIR}/${BINARY_NAME}"
+    fi
+
+    return $install_result
 }
 
 verify_installation() {

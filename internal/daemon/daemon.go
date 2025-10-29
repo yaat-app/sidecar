@@ -130,8 +130,11 @@ func IsRunning() bool {
 	return err == nil
 }
 
-// Uninstall removes the sidecar from the system
-func Uninstall() error {
+// Uninstall removes YAAT Sidecar from the system
+// Returns: (warnings, error)
+// warnings: list of non-fatal issues encountered
+// error: fatal error that prevented uninstallation (nil if successful)
+func Uninstall() ([]string, error) {
 	fmt.Println("🧹  Uninstalling YAAT Sidecar...")
 	fmt.Println()
 
@@ -179,7 +182,12 @@ func Uninstall() error {
 	// Step 5: remove configuration files
 	warnings = append(warnings, removePathsGroup("configuration files", possibleConfigFiles(), true)...)
 
-	// Step 6: remove binary and symlinks
+	// Step 6: remove state and queue directories
+	warnings = append(warnings, removePathsGroup("state files", possibleStateFiles(), false)...)
+	warnings = append(warnings, removeDirectoriesGroup("queue directories", possibleQueueDirs())...)
+	warnings = append(warnings, removeDirectoriesGroup("state directories", possibleStateDirs())...)
+
+	// Step 7: remove binary and symlinks
 	warnings = append(warnings, removeBinaryAndLinks(executable)...)
 
 	fmt.Println()
@@ -189,87 +197,137 @@ func Uninstall() error {
 			fmt.Printf("   • %s\n", w)
 		}
 		fmt.Println()
-		return fmt.Errorf("uninstall completed with %d warning(s)", len(warnings))
+		return warnings, nil
 	}
 
 	fmt.Println("✓ Uninstall completed cleanly")
-	return nil
+	return warnings, nil
 }
 
 func stopResidualProcesses() (bool, error) {
-	candidates := []struct {
-		cmd  string
-		args []string
-	}{
-		{"pkill", []string{"-f", "yaat-sidecar"}},
-		{"killall", []string{"yaat-sidecar"}},
+	// Get current process PID to avoid killing ourselves during uninstall
+	currentPID := os.Getpid()
+	currentPIDStr := strconv.Itoa(currentPID)
+
+	// Use pgrep to find all yaat-sidecar processes
+	checkCmd := exec.Command("pgrep", "-f", "yaat-sidecar")
+	output, err := checkCmd.Output()
+	if err != nil {
+		// Exit code 1 means no processes found, which is fine
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
+		// pgrep not available or other error - skip force kill
+		return false, nil
 	}
 
-	found := false
-	for _, candidate := range candidates {
-		if _, err := exec.LookPath(candidate.cmd); err != nil {
+	// Parse PIDs and kill each one except the current process
+	pidsStr := strings.TrimSpace(string(output))
+	if pidsStr == "" {
+		return false, nil
+	}
+
+	pids := strings.Fields(pidsStr)
+	killed := false
+
+	for _, pidStr := range pids {
+		pidStr = strings.TrimSpace(pidStr)
+		if pidStr == "" || pidStr == currentPIDStr {
+			continue // Skip empty or current process
+		}
+
+		// Verify it's a valid PID
+		pid, err := strconv.Atoi(pidStr)
+		if err != nil {
 			continue
 		}
-		cmd := exec.Command(candidate.cmd, candidate.args...)
-		if err := cmd.Run(); err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-				// Command worked but no processes were matched.
-				continue
+
+		// Send SIGTERM to this process
+		if process, err := os.FindProcess(pid); err == nil {
+			if err := process.Signal(syscall.SIGTERM); err == nil {
+				killed = true
 			}
-			return false, fmt.Errorf("%s %s: %w", candidate.cmd, strings.Join(candidate.args, " "), err)
 		}
-		found = true
-		break
 	}
 
-	return found, nil
+	return killed, nil
 }
 
 func removeLaunchAgent() []string {
-	fmt.Print("→ Removing macOS launch agent... ")
+	fmt.Print("→ Removing macOS launch services... ")
 	var warnings []string
 
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		fmt.Println("(skipped)")
-		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("resolve home directory: %v", err))
-		}
-		return warnings
+	// Check both LaunchAgent (user) and LaunchDaemon (system)
+	plistPaths := []struct {
+		path   string
+		system bool
+	}{
+		{"/Library/LaunchDaemons/io.yaat.sidecar.plist", true},
 	}
 
-	plistPath := filepath.Join(home, "Library", "LaunchAgents", "io.yaat.sidecar.plist")
-	if _, err := os.Stat(plistPath); err != nil {
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		plistPaths = append(plistPaths, struct {
+			path   string
+			system bool
+		}{filepath.Join(home, "Library", "LaunchAgents", "io.yaat.sidecar.plist"), false})
+	}
+
+	found := false
+	for _, plist := range plistPaths {
+		if _, err := os.Stat(plist.path); err != nil {
+			continue
+		}
+		found = true
+
+		// Try modern bootout first, then fallback to unload/remove.
+		if plist.system {
+			// System-level daemon
+			commands := [][]string{
+				{"launchctl", "bootout", "system", plist.path},
+				{"launchctl", "unload", plist.path},
+				{"launchctl", "remove", "io.yaat.sidecar"},
+			}
+			for _, cmd := range commands {
+				if _, lookErr := exec.LookPath(cmd[0]); lookErr != nil {
+					continue
+				}
+				exec.Command(cmd[0], cmd[1:]...).Run()
+			}
+		} else {
+			// User-level agent
+			uid := fmt.Sprintf("gui/%d", os.Getuid())
+			commands := [][]string{
+				{"launchctl", "bootout", uid, plist.path},
+				{"launchctl", "unload", plist.path},
+				{"launchctl", "remove", "io.yaat.sidecar"},
+			}
+			for _, cmd := range commands {
+				if _, lookErr := exec.LookPath(cmd[0]); lookErr != nil {
+					continue
+				}
+				exec.Command(cmd[0], cmd[1:]...).Run()
+			}
+		}
+
+		if err := os.Remove(plist.path); err != nil {
+			if os.IsPermission(err) {
+				warnings = append(warnings, fmt.Sprintf("remove %s: permission denied (try with sudo)", plist.path))
+			} else {
+				warnings = append(warnings, fmt.Sprintf("remove %s: %v", plist.path, err))
+			}
+		}
+	}
+
+	if !found {
 		fmt.Println("(not installed)")
 		return warnings
 	}
 
-	// Try modern bootout first, then fallback to unload/remove.
-	uid := fmt.Sprintf("gui/%d", os.Getuid())
-	commands := [][]string{
-		{"launchctl", "bootout", uid, plistPath},
-		{"launchctl", "unload", plistPath},
-		{"launchctl", "remove", "io.yaat.sidecar"},
+	if len(warnings) > 0 {
+		fmt.Println("⚠️  Warning")
+	} else {
+		fmt.Println("✓")
 	}
-	for _, cmd := range commands {
-		if _, lookErr := exec.LookPath(cmd[0]); lookErr != nil {
-			continue
-		}
-		exec.Command(cmd[0], cmd[1:]...).Run()
-	}
-
-	if err := os.Remove(plistPath); err != nil {
-		if os.IsPermission(err) {
-			fmt.Println("requires sudo")
-			warnings = append(warnings, fmt.Sprintf("remove launch agent: permission denied for %s", plistPath))
-		} else {
-			fmt.Println("⚠️  Warning")
-			warnings = append(warnings, fmt.Sprintf("remove launch agent %s: %v", plistPath, err))
-		}
-		return warnings
-	}
-
-	fmt.Println("✓")
 	return warnings
 }
 
@@ -372,6 +430,59 @@ func removePathsGroup(label string, paths []string, removeParents bool) []string
 		if removeParents {
 			removeParentDirIfEmpty(filepath.Dir(p))
 		}
+	}
+
+	if removed > 0 {
+		fmt.Printf("✓ (removed %d)\n", removed)
+	} else {
+		fmt.Println("(none found)")
+	}
+
+	return warnings
+}
+
+func removeDirectoriesGroup(label string, dirs []string) []string {
+	fmt.Printf("→ Removing %s... ", strings.ToLower(label))
+	var warnings []string
+
+	seen := map[string]struct{}{}
+	removed := 0
+
+	for _, dir := range dirs {
+		if dir == "" {
+			continue
+		}
+		if _, ok := seen[dir]; ok {
+			continue
+		}
+		seen[dir] = struct{}{}
+
+		// Check if directory exists
+		info, err := os.Stat(dir)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("stat %s %s: %v", label, dir, err))
+			continue
+		}
+
+		// Skip if not a directory
+		if !info.IsDir() {
+			continue
+		}
+
+		// Remove directory recursively
+		if err := os.RemoveAll(dir); err != nil {
+			if os.IsPermission(err) {
+				warnings = append(warnings, fmt.Sprintf("remove %s %s: permission denied", label, dir))
+			} else {
+				warnings = append(warnings, fmt.Sprintf("remove %s %s: %v", label, dir, err))
+			}
+			continue
+		}
+
+		removed++
 	}
 
 	if removed > 0 {
@@ -560,6 +671,49 @@ func possibleBinaryLinks() []string {
 			filepath.Join(home, "bin", "yaat-sidecar"),
 			filepath.Join(home, ".local", "bin", "yaat-sidecar"),
 		)
+	}
+
+	return paths
+}
+
+func possibleStateFiles() []string {
+	var paths []string
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		paths = append(paths, filepath.Join(home, ".yaat", "state.json"))
+	}
+	return paths
+}
+
+func possibleQueueDirs() []string {
+	var paths []string
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		paths = append(paths, filepath.Join(home, ".yaat", "queue"))
+	}
+	// Check for custom queue directory from environment
+	if queueDir := os.Getenv("YAAT_QUEUE_DIR"); queueDir != "" {
+		paths = append(paths, queueDir)
+	}
+	return paths
+}
+
+func possibleStateDirs() []string {
+	var paths []string
+
+	// Linux state directories
+	paths = append(paths,
+		"/var/lib/yaat",
+		"/var/log/yaat",
+	)
+
+	// macOS state directories
+	paths = append(paths,
+		"/usr/local/var/lib/yaat",
+		"/usr/local/var/log/yaat",
+	)
+
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		// User-level state directory
+		paths = append(paths, filepath.Join(home, ".yaat"))
 	}
 
 	return paths
