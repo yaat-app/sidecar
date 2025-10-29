@@ -118,7 +118,7 @@ verify_installation() {
     else
         print_error "Installation verification failed."
         exit 1
-    }
+    fi
 }
 
 ensure_directory() {
@@ -335,7 +335,7 @@ main() {
     get_latest_version
     install_binary
     verify_installation
-    post_install()
+    post_install
     print_next_steps
 }
 
