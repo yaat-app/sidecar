@@ -23,7 +23,7 @@ jobs:
           go-version: '1.22'
 
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential
+        run: sudo apt-get update && sudo apt-get install -y build-essential libsystemd-dev
 
       - name: Run tests (with CGO for DuckDB)
         run: CGO_ENABLED=1 go test -vet=off -v ./...
@@ -51,7 +51,7 @@ jobs:
 
       - name: Install build dependencies (CGO + DuckDB)
         if: ${{ matrix.requires_cgo == true }}
-        run: sudo apt-get update && sudo apt-get install -y build-essential gcc-aarch64-linux-gnu
+        run: sudo apt-get update && sudo apt-get install -y build-essential gcc-aarch64-linux-gnu libsystemd-dev
 
       - name: Set up Go
         uses: actions/setup-go@v5
