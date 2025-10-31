@@ -550,3 +550,83 @@ func isRunningInK8s() bool {
 
 	return false
 }
+
+// KubernetesMetadata represents detected Kubernetes metadata
+type KubernetesMetadata struct {
+	InCluster bool              // running in k8s
+	PodName   string            // from POD_NAME env or hostname
+	Namespace string            // from POD_NAMESPACE env or service account
+	NodeName  string            // from NODE_NAME env
+	PodIP     string            // from POD_IP env
+	Labels    map[string]string // from downward API
+	Tags      map[string]string // merged tags for events
+}
+
+// DetectKubernetesMetadata extracts Kubernetes metadata
+func DetectKubernetesMetadata() *KubernetesMetadata {
+	if !isRunningInK8s() {
+		return &KubernetesMetadata{
+			InCluster: false,
+			Tags:      make(map[string]string),
+		}
+	}
+
+	k8s := &KubernetesMetadata{
+		InCluster: true,
+		Labels:    make(map[string]string),
+		Tags:      make(map[string]string),
+	}
+
+	// Read from downward API environment variables (most reliable)
+	k8s.PodName = os.Getenv("POD_NAME")
+	k8s.Namespace = os.Getenv("POD_NAMESPACE")
+	k8s.NodeName = os.Getenv("NODE_NAME")
+	k8s.PodIP = os.Getenv("POD_IP")
+
+	// Fallback: read namespace from service account
+	if k8s.Namespace == "" {
+		if data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+			k8s.Namespace = strings.TrimSpace(string(data))
+		}
+	}
+
+	// Fallback: use hostname as pod name
+	if k8s.PodName == "" {
+		if hostname, err := os.Hostname(); err == nil {
+			k8s.PodName = hostname
+		}
+	}
+
+	// Build tags
+	k8s.Tags["k8s.pod.name"] = k8s.PodName
+	if k8s.Namespace != "" {
+		k8s.Tags["k8s.namespace"] = k8s.Namespace
+	}
+	if k8s.NodeName != "" {
+		k8s.Tags["k8s.node.name"] = k8s.NodeName
+	}
+	if k8s.PodIP != "" {
+		k8s.Tags["k8s.pod.ip"] = k8s.PodIP
+	}
+
+	// Try to read labels from downward API volume mount
+	// In K8s, labels can be mounted to /etc/podinfo/labels
+	if data, err := os.ReadFile("/etc/podinfo/labels"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				val := strings.TrimSpace(strings.Trim(parts[1], "\""))
+				k8s.Labels[key] = val
+				// Add as tag with k8s.label. prefix
+				k8s.Tags["k8s.label."+key] = val
+			}
+		}
+	}
+
+	return k8s
+}

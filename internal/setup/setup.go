@@ -134,11 +134,13 @@ func Run(configPath string) error {
 	}
 
 	if promptYesNo(reader, "Start YAAT Sidecar in the background?", true) {
-		if err := daemon.Start(cfg.SourcePath, "", false); err != nil {
+		defaultPidPath := "/var/run/yaat-sidecar.pid"
+		defaultLogPath := "/var/log/yaat-sidecar.log"
+		if err := daemon.Start(cfg.SourcePath, "", defaultPidPath, false); err != nil {
 			fmt.Printf("✗ Failed to start daemon: %v\n", err)
 		} else {
 			fmt.Println("✓ Sidecar started successfully")
-			fmt.Printf("  Logs: %s\n", daemon.GetLogPath())
+			fmt.Printf("  Logs: %s\n", daemon.GetLogPath(defaultLogPath))
 		}
 	}
 
@@ -386,7 +388,7 @@ func testAPI(cfg *config.Config) (*forwarder.TestReport, error) {
 		MaxBatchBytes: cfg.Delivery.MaxBatchBytes,
 	}
 	fwd := forwarder.NewWithOptions(cfg.APIEndpoint, cfg.APIKey, opts)
-	return fwd.Test(cfg.ServiceName, cfg.Environment)
+	return fwd.Test(cfg.ServiceName, cfg.Environment, cfg.Tags)
 }
 
 func fileExists(path string) bool {

@@ -16,22 +16,26 @@ import (
 
 // JournaldTailer reads entries from systemd-journald and converts them to events.
 type JournaldTailer struct {
-	serviceName string
-	environment string
-	buf         *buffer.Buffer
-	ctx         context.Context
-	cancel      context.CancelFunc
+	organizationID string
+	serviceName    string
+	environment    string
+	globalTags     map[string]string
+	buf            *buffer.Buffer
+	ctx            context.Context
+	cancel         context.CancelFunc
 }
 
 // NewJournaldTailer creates a journald tailer.
-func NewJournaldTailer(serviceName, environment string, buf *buffer.Buffer) *JournaldTailer {
+func NewJournaldTailer(organizationID, serviceName, environment string, globalTags map[string]string, buf *buffer.Buffer) *JournaldTailer {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &JournaldTailer{
-		serviceName: serviceName,
-		environment: environment,
-		buf:         buf,
-		ctx:         ctx,
-		cancel:      cancel,
+		organizationID: organizationID,
+		serviceName:    serviceName,
+		environment:    environment,
+		globalTags:     globalTags,
+		buf:            buf,
+		ctx:            ctx,
+		cancel:         cancel,
 	}
 }
 
@@ -86,6 +90,23 @@ func (t *JournaldTailer) Start(matchUnit string) error {
 			}
 
 			event := t.convertEntry(entry)
+
+			// Merge global tags with event-specific tags
+			if len(t.globalTags) > 0 {
+				eventTags, ok := event["tags"].(map[string]string)
+				if !ok || eventTags == nil {
+					// No existing tags, use global tags
+					event["tags"] = t.globalTags
+				} else {
+					// Merge tags (event-specific tags take priority)
+					for k, v := range t.globalTags {
+						if _, exists := eventTags[k]; !exists {
+							eventTags[k] = v
+						}
+					}
+				}
+			}
+
 			if scrubber.Apply(event) {
 				t.buf.Add(event)
 			}
@@ -126,13 +147,14 @@ func (t *JournaldTailer) convertEntry(entry *sdjournal.JournalEntry) buffer.Even
 	}
 
 	return buffer.Event{
-		"service_name": t.serviceName,
-		"environment":  t.environment,
-		"event_type":   "log",
-		"timestamp":    timestamp.Format(time.RFC3339Nano),
-		"level":        level,
-		"message":      message,
-		"tags":         tags,
+		"organization_id": t.organizationID,
+		"service_name":    t.serviceName,
+		"environment":     t.environment,
+		"event_type":      "log",
+		"timestamp":       timestamp.Format(time.RFC3339Nano),
+		"level":           level,
+		"message":         message,
+		"tags":            tags,
 	}
 }
 

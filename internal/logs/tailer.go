@@ -11,11 +11,13 @@ import (
 
 // Tailer tails a log file and parses lines
 type Tailer struct {
-	path        string
-	format      string
-	serviceName string
-	environment string
-	buffer      *buffer.Buffer
+	path           string
+	format         string
+	organizationID string
+	serviceName    string
+	environment    string
+	globalTags     map[string]string
+	buffer         *buffer.Buffer
 
 	// Multi-line tracking for stack traces
 	inTraceback    bool
@@ -24,13 +26,15 @@ type Tailer struct {
 }
 
 // New creates a new Tailer
-func New(path, format, serviceName, environment string, buf *buffer.Buffer) *Tailer {
+func New(path, format, organizationID, serviceName, environment string, globalTags map[string]string, buf *buffer.Buffer) *Tailer {
 	return &Tailer{
-		path:        path,
-		format:      format,
-		serviceName: serviceName,
-		environment: environment,
-		buffer:      buf,
+		path:           path,
+		format:         format,
+		organizationID: organizationID,
+		serviceName:    serviceName,
+		environment:    environment,
+		globalTags:     globalTags,
+		buffer:         buf,
 	}
 }
 
@@ -77,13 +81,29 @@ func (t *Tailer) Start() error {
 			}
 
 			// Parse log line
-			event := ParseLog(line.Text, t.format, t.serviceName, t.environment)
+			event := ParseLog(line.Text, t.format, t.organizationID, t.serviceName, t.environment)
 			if event == nil {
 				continue
 			}
 
 			if !scrubber.Apply(*event) {
 				continue
+			}
+
+			// Merge global tags with event-specific tags
+			if len(t.globalTags) > 0 {
+				eventTags, ok := (*event)["tags"].(map[string]string)
+				if !ok || eventTags == nil {
+					// No existing tags, use global tags
+					(*event)["tags"] = t.globalTags
+				} else {
+					// Merge tags (event-specific tags take priority)
+					for k, v := range t.globalTags {
+						if _, exists := eventTags[k]; !exists {
+							eventTags[k] = v
+						}
+					}
+				}
 			}
 
 			// Track error events for potential tracebacks

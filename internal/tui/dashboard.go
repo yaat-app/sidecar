@@ -282,7 +282,8 @@ func (m Dashboard) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		// Update daemon status
-		m.isRunning = daemon.IsRunning()
+		defaultPidPath := "/var/run/yaat-sidecar.pid"
+		m.isRunning = daemon.IsRunning(defaultPidPath)
 		if m.isRunning {
 			m.uptime += 1 * time.Second
 		}
@@ -478,9 +479,10 @@ func (m Dashboard) renderServiceSection() string {
 	}
 	b.WriteString(MetricRow("Daemon", statusLabel, highlight) + "\n")
 
-	logPath := daemon.GetLogPath()
+	defaultLogPath := "/var/log/yaat-sidecar.log"
+	logPath := daemon.GetLogPath(defaultLogPath)
 	if logPath == "" {
-		logPath = daemon.GetExpectedLogPath() + " (pending)"
+		logPath = daemon.GetExpectedLogPath(defaultLogPath) + " (pending)"
 	}
 	b.WriteString(MetricRow("Log file", logPath, false) + "\n")
 
@@ -835,7 +837,7 @@ func (m *Dashboard) runTests() {
 		MaxBatchBytes: m.config.Delivery.MaxBatchBytes,
 	}
 	fwd := forwarder.NewWithOptions(m.config.APIEndpoint, m.config.APIKey, opts)
-	report, err := fwd.Test(m.config.ServiceName, m.config.Environment)
+	report, err := fwd.Test(m.config.ServiceName, m.config.Environment, m.config.Tags)
 
 	var (
 		latency time.Duration

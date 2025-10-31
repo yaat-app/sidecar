@@ -29,22 +29,11 @@ print_info "Uninstalling YAAT Sidecar..."
 if command -v yaat-sidecar &> /dev/null; then
     print_info "Stopping sidecar..."
 
-    case "$OS" in
-        linux*)
-            if systemctl is-active --quiet yaat-sidecar 2>/dev/null; then
-                sudo systemctl stop yaat-sidecar
-                sudo systemctl disable yaat-sidecar
-                print_info "Stopped systemd service"
-            fi
-            ;;
-        darwin*)
-            PLIST="$HOME/Library/LaunchAgents/io.yaat.sidecar.plist"
-            if [ -f "$PLIST" ]; then
-                launchctl unload "$PLIST" 2>/dev/null || true
-                print_info "Stopped launchd service"
-            fi
-            ;;
-    esac
+    if systemctl is-active --quiet yaat-sidecar 2>/dev/null; then
+        sudo systemctl stop yaat-sidecar
+        sudo systemctl disable yaat-sidecar
+        print_info "Stopped systemd service"
+    fi
 
     # Kill any running processes
     pkill -f yaat-sidecar || true
@@ -57,19 +46,10 @@ if [ -f "/usr/local/bin/yaat-sidecar" ]; then
 fi
 
 # Remove systemd service (Linux)
-if [ "$OS" = "linux" ] && [ -f "/etc/systemd/system/yaat-sidecar.service" ]; then
+if [ -f "/etc/systemd/system/yaat-sidecar.service" ]; then
     print_info "Removing systemd service..."
     sudo rm -f /etc/systemd/system/yaat-sidecar.service
     sudo systemctl daemon-reload
-fi
-
-# Remove launchd plist (macOS)
-if [ "$OS" = "darwin" ]; then
-    PLIST="$HOME/Library/LaunchAgents/io.yaat.sidecar.plist"
-    if [ -f "$PLIST" ]; then
-        print_info "Removing launchd plist..."
-        rm -f "$PLIST"
-    fi
 fi
 
 # Remove configuration

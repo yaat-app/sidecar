@@ -17,12 +17,13 @@ import (
 
 // Server listens for StatsD/dogstatsd metrics and forwards them as metric events.
 type Server struct {
-	addr      string
-	namespace string
-	tags      map[string]string
-	service   string
-	env       string
-	buf       *buffer.Buffer
+	addr           string
+	namespace      string
+	tags           map[string]string
+	organizationID string
+	service        string
+	env            string
+	buf            *buffer.Buffer
 
 	mu         sync.RWMutex
 	conns      []net.PacketConn
@@ -33,19 +34,24 @@ type Server struct {
 }
 
 // New creates a new StatsD server.
-func New(cfg config.StatsDConfig, serviceName, environment string, buf *buffer.Buffer) *Server {
-	tagCopy := make(map[string]string, len(cfg.Tags))
+func New(cfg config.StatsDConfig, organizationID, serviceName, environment string, globalTags map[string]string, buf *buffer.Buffer) *Server {
+	// Merge global tags with StatsD-specific tags (StatsD-specific take priority)
+	tagCopy := make(map[string]string, len(globalTags)+len(cfg.Tags))
+	for k, v := range globalTags {
+		tagCopy[k] = v
+	}
 	for k, v := range cfg.Tags {
 		tagCopy[k] = v
 	}
 	return &Server{
-		addr:      cfg.ListenAddr,
-		namespace: cfg.Namespace,
-		tags:      tagCopy,
-		service:   serviceName,
-		env:       environment,
-		buf:       buf,
-		stop:      make(chan struct{}),
+		addr:           cfg.ListenAddr,
+		namespace:      cfg.Namespace,
+		tags:           tagCopy,
+		organizationID: organizationID,
+		service:        serviceName,
+		env:            environment,
+		buf:            buf,
+		stop:           make(chan struct{}),
 	}
 }
 
@@ -216,12 +222,13 @@ func (s *Server) parseLine(line string, now time.Time) (buffer.Event, error) {
 	}
 
 	return buffer.Event{
-		"service_name": serviceName,
-		"environment":  environment,
-		"event_type":   "metric",
-		"timestamp":    now.Format(time.RFC3339Nano),
-		"metric_name":  fullName,
-		"metric_value": finalValue,
-		"tags":         eventTags,
+		"organization_id": s.organizationID,
+		"service_name":    serviceName,
+		"environment":     environment,
+		"event_type":      "metric",
+		"timestamp":       now.Format(time.RFC3339Nano),
+		"metric_name":     fullName,
+		"metric_value":    finalValue,
+		"tags":            eventTags,
 	}, nil
 }

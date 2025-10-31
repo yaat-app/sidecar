@@ -6,10 +6,11 @@ import (
 
 func TestParseDjangoLogValid(t *testing.T) {
 	line := "[2024-10-26 10:30:15,123] ERROR [django.request] Internal server error"
+	organizationID := "org_test123"
 	serviceName := "my-service"
 	environment := "production"
 
-	event := ParseDjangoLog(line, serviceName, environment)
+	event := ParseDjangoLog(line, organizationID, serviceName, environment)
 
 	if event == nil {
 		t.Fatal("ParseDjangoLog returned nil for valid log")
@@ -47,10 +48,11 @@ func TestParseDjangoLogValid(t *testing.T) {
 
 func TestParseDjangoLogInvalid(t *testing.T) {
 	line := "This is not a valid Django log line"
+	organizationID := "org_test123"
 	serviceName := "my-service"
 	environment := "production"
 
-	event := ParseDjangoLog(line, serviceName, environment)
+	event := ParseDjangoLog(line, organizationID, serviceName, environment)
 
 	if event == nil {
 		t.Fatal("ParseDjangoLog returned nil for invalid log (should return generic event)")
@@ -85,7 +87,7 @@ func TestParseDjangoLogDifferentLevels(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.logLevel, func(t *testing.T) {
 			line := "[2024-10-26 10:30:15,123] " + tt.logLevel + " [django.test] Test message"
-			event := ParseDjangoLog(line, "test", "production")
+			event := ParseDjangoLog(line, "org_test123", "test", "production")
 
 			if event == nil {
 				t.Fatal("ParseDjangoLog returned nil")
@@ -101,10 +103,11 @@ func TestParseDjangoLogDifferentLevels(t *testing.T) {
 
 func TestParseNginxLogValid(t *testing.T) {
 	line := `192.168.1.1 - - [26/Oct/2024:10:30:15 +0000] "GET /api/users HTTP/1.1" 200 1234`
+	organizationID := "org_test123"
 	serviceName := "nginx-service"
 	environment := "production"
 
-	event := ParseNginxLog(line, serviceName, environment)
+	event := ParseNginxLog(line, organizationID, serviceName, environment)
 
 	if event == nil {
 		t.Fatal("ParseNginxLog returned nil for valid log")
@@ -146,10 +149,11 @@ func TestParseNginxLogValid(t *testing.T) {
 
 func TestParseNginxLogInvalid(t *testing.T) {
 	line := "This is not a valid Nginx log line"
+	organizationID := "org_test123"
 	serviceName := "nginx-service"
 	environment := "production"
 
-	event := ParseNginxLog(line, serviceName, environment)
+	event := ParseNginxLog(line, organizationID, serviceName, environment)
 
 	if event != nil {
 		t.Error("ParseNginxLog should return nil for invalid log")
@@ -162,7 +166,7 @@ func TestParseNginxLogDifferentMethods(t *testing.T) {
 	for _, method := range methods {
 		t.Run(method, func(t *testing.T) {
 			line := `192.168.1.1 - - [26/Oct/2024:10:30:15 +0000] "` + method + ` /api/test HTTP/1.1" 200 100`
-			event := ParseNginxLog(line, "test", "production")
+			event := ParseNginxLog(line, "org_test123", "test", "production")
 
 			if event == nil {
 				t.Fatal("ParseNginxLog returned nil")
@@ -183,7 +187,7 @@ func TestParseNginxLogDifferentMethods(t *testing.T) {
 
 func TestParseDockerLogEnvelope(t *testing.T) {
 	line := `{"log":"{\"message\":\"hello\",\"level\":\"warning\",\"custom\":\"x\"}\n","stream":"stdout","time":"2024-10-26T12:00:00.123456789Z","containerID":"abc123","source":"compose"}`
-	event := ParseDockerLog(line, "svc", "prod")
+	event := ParseDockerLog(line, "org_test123", "svc", "prod")
 	if event == nil {
 		t.Fatal("ParseDockerLog returned nil")
 	}
@@ -219,7 +223,7 @@ func TestParseDockerLogEnvelope(t *testing.T) {
 
 func TestParseDockerLogStderrFallback(t *testing.T) {
 	line := `{"log":"plain line\n","stream":"stderr","time":"2024-10-26T12:00:00Z","containerID":"def456"}`
-	event := ParseDockerLog(line, "svc", "prod")
+	event := ParseDockerLog(line, "org_test123", "svc", "prod")
 	if event == nil {
 		t.Fatal("ParseDockerLog returned nil")
 	}

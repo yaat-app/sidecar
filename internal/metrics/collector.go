@@ -12,11 +12,12 @@ import (
 
 // Collector periodically samples host metrics and enqueues metric events.
 type Collector struct {
-	serviceName string
-	environment string
-	tags        map[string]string
-	interval    time.Duration
-	buf         *buffer.Buffer
+	organizationID string
+	serviceName    string
+	environment    string
+	tags           map[string]string
+	interval       time.Duration
+	buf            *buffer.Buffer
 
 	sampler sampler
 
@@ -27,25 +28,30 @@ type Collector struct {
 }
 
 // NewCollector constructs a collector using the provided configuration.
-func NewCollector(serviceName, environment string, cfg config.MetricsConfig, buf *buffer.Buffer) (*Collector, error) {
+func NewCollector(organizationID, serviceName, environment string, globalTags map[string]string, cfg config.MetricsConfig, buf *buffer.Buffer) (*Collector, error) {
 	sampler, err := newSampler()
 	if err != nil {
 		return nil, err
 	}
 
-	tagsCopy := make(map[string]string, len(cfg.Tags))
+	// Merge global tags with metrics-specific tags (metrics-specific take priority)
+	tagsCopy := make(map[string]string, len(globalTags)+len(cfg.Tags))
+	for k, v := range globalTags {
+		tagsCopy[k] = v
+	}
 	for k, v := range cfg.Tags {
 		tagsCopy[k] = v
 	}
 
 	return &Collector{
-		serviceName: serviceName,
-		environment: environment,
-		tags:        tagsCopy,
-		interval:    cfg.IntervalDuration,
-		buf:         buf,
-		sampler:     sampler,
-		stop:        make(chan struct{}),
+		organizationID: organizationID,
+		serviceName:    serviceName,
+		environment:    environment,
+		tags:           tagsCopy,
+		interval:       cfg.IntervalDuration,
+		buf:            buf,
+		sampler:        sampler,
+		stop:           make(chan struct{}),
 	}, nil
 }
 
@@ -105,13 +111,14 @@ func (c *Collector) buildEvents(curr Counters) []buffer.Event {
 			eventTags[k] = v
 		}
 		return buffer.Event{
-			"service_name": c.serviceName,
-			"environment":  c.environment,
-			"event_type":   "metric",
-			"timestamp":    now.Format(time.RFC3339Nano),
-			"metric_name":  name,
-			"metric_value": value,
-			"tags":         eventTags,
+			"organization_id": c.organizationID,
+			"service_name":    c.serviceName,
+			"environment":     c.environment,
+			"event_type":      "metric",
+			"timestamp":       now.Format(time.RFC3339Nano),
+			"metric_name":     name,
+			"metric_value":    value,
+			"tags":            eventTags,
 		}
 	}
 

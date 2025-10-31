@@ -11,7 +11,7 @@ import (
 
 type JournaldTailer struct{}
 
-func NewJournaldTailer(serviceName, environment string, buf *buffer.Buffer) *JournaldTailer {
+func NewJournaldTailer(organizationID, serviceName, environment string, globalTags map[string]string, buf *buffer.Buffer) *JournaldTailer {
 	return &JournaldTailer{}
 }
 

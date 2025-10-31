@@ -10,9 +10,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yaat-app/sidecar/internal/analytics"
 	"github.com/yaat-app/sidecar/internal/buffer"
 	"github.com/yaat-app/sidecar/internal/config"
 	"github.com/yaat-app/sidecar/internal/daemon"
+	"github.com/yaat-app/sidecar/internal/detection"
 	"github.com/yaat-app/sidecar/internal/diag"
 	"github.com/yaat-app/sidecar/internal/forwarder"
 	"github.com/yaat-app/sidecar/internal/health"
@@ -28,11 +30,12 @@ import (
 	"github.com/yaat-app/sidecar/internal/tui"
 )
 
-const version = "1.2.0"
+const version = "0.0.11-alpha"
 
 func main() {
 	var (
 		configPath     = flag.String("config", "yaat.yaml", "Path to configuration file")
+		instanceName   = flag.String("instance", "default", "Instance name for multi-instance deployments")
 		showVersion    = flag.Bool("version", false, "Show version and exit")
 		daemonMode     = flag.Bool("daemon", false, "Run in background (daemon mode)")
 		daemonShort    = flag.Bool("d", false, "Run in background (short flag)")
@@ -134,7 +137,8 @@ func main() {
 
 	// Handle stop flag
 	if *stopService {
-		if err := daemon.Stop(); err != nil {
+		pidPath := getInstancePIDPath(*instanceName)
+		if err := daemon.Stop(pidPath); err != nil {
 			if isNotRunningError(err) {
 				fmt.Println("ℹ️ Sidecar is not running")
 				os.Exit(0)
@@ -148,15 +152,17 @@ func main() {
 
 	// Handle status flag
 	if *statusService {
-		if daemon.IsRunning() {
+		pidPath := getInstancePIDPath(*instanceName)
+		logPath := getInstanceLogPath(*instanceName)
+		if daemon.IsRunning(pidPath) {
 			pid := "unknown"
-			if data, err := os.ReadFile(daemon.GetPidPath()); err == nil {
+			if data, err := os.ReadFile(daemon.GetPidPath(pidPath)); err == nil {
 				if trimmed := strings.TrimSpace(string(data)); trimmed != "" {
 					pid = trimmed
 				}
 			}
 			fmt.Printf("✓ YAAT Sidecar is running (PID %s)\n", pid)
-			fmt.Printf("  Logs: %s\n", daemon.GetLogPath())
+			fmt.Printf("  Logs: %s\n", daemon.GetLogPath(logPath))
 		} else {
 			fmt.Println("✗ YAAT Sidecar is not running")
 		}
@@ -165,24 +171,26 @@ func main() {
 
 	// Handle restart flag
 	if *restartService {
+		pidPath := getInstancePIDPath(*instanceName)
+		logPath := getInstanceLogPath(*instanceName)
 		cfg, err := config.LoadConfig(*configPath)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
 			os.Exit(1)
 		}
-		if daemon.IsRunning() {
-			if err := daemon.Stop(); err != nil && !isNotRunningError(err) {
+		if daemon.IsRunning(pidPath) {
+			if err := daemon.Stop(pidPath); err != nil && !isNotRunningError(err) {
 				fmt.Fprintf(os.Stderr, "Failed to stop running sidecar: %v\n", err)
 				os.Exit(1)
 			}
 			fmt.Println("✓ Stopped existing sidecar")
 		}
-		if err := daemon.Start(cfg.SourcePath, *logFile, isVerbose); err != nil {
+		if err := daemon.Start(cfg.SourcePath, *logFile, pidPath, isVerbose); err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to start sidecar: %v\n", err)
 			os.Exit(1)
 		}
 		fmt.Println("✓ Sidecar restarted in background")
-		fmt.Printf("  Logs: %s\n", daemon.GetLogPath())
+		fmt.Printf("  Logs: %s\n", daemon.GetLogPath(logPath))
 		os.Exit(0)
 	}
 
@@ -207,6 +215,29 @@ func main() {
 	}
 	resolvedConfigPath := cfg.SourcePath
 
+	// Detect cloud provider and Kubernetes metadata at runtime
+	cloudMetadata := detection.DetectCloudProvider()
+	k8sMetadata := detection.DetectKubernetesMetadata()
+
+	// Merge detected tags into config (config tags take priority)
+	if cfg.Tags == nil {
+		cfg.Tags = make(map[string]string)
+	}
+	if cloudMetadata != nil {
+		for k, v := range cloudMetadata.Tags {
+			if _, exists := cfg.Tags[k]; !exists {
+				cfg.Tags[k] = v
+			}
+		}
+	}
+	if k8sMetadata != nil {
+		for k, v := range k8sMetadata.Tags {
+			if _, exists := cfg.Tags[k]; !exists {
+				cfg.Tags[k] = v
+			}
+		}
+	}
+
 	// Handle validate flag
 	if *validateCfg {
 		fmt.Println("✓ Configuration is valid")
@@ -224,14 +255,57 @@ func main() {
 		fmt.Printf("  Host metrics interval: %s\n", cfg.Metrics.Interval)
 		fmt.Printf("  StatsD enabled: %t\n", cfg.Metrics.StatsD.Enabled)
 		fmt.Printf("  StatsD listen addr: %s\n", cfg.Metrics.StatsD.ListenAddr)
+
+		// Display detected cloud provider and Kubernetes metadata
+		if cloudMetadata != nil && cloudMetadata.Provider != "unknown" {
+			fmt.Printf("\n  Detected Cloud Provider:\n")
+			fmt.Printf("    Provider: %s\n", cloudMetadata.Provider)
+			fmt.Printf("    Region: %s\n", cloudMetadata.Region)
+			if cloudMetadata.Zone != "" {
+				fmt.Printf("    Zone: %s\n", cloudMetadata.Zone)
+			}
+			if cloudMetadata.InstanceType != "" {
+				fmt.Printf("    Instance Type: %s\n", cloudMetadata.InstanceType)
+			}
+			if cloudMetadata.InstanceID != "" {
+				fmt.Printf("    Instance ID: %s\n", cloudMetadata.InstanceID)
+			}
+		} else {
+			fmt.Printf("\n  Cloud Provider: Not detected\n")
+		}
+
+		if k8sMetadata != nil && k8sMetadata.InCluster {
+			fmt.Printf("\n  Detected Kubernetes:\n")
+			fmt.Printf("    Pod Name: %s\n", k8sMetadata.PodName)
+			fmt.Printf("    Namespace: %s\n", k8sMetadata.Namespace)
+			if k8sMetadata.NodeName != "" {
+				fmt.Printf("    Node: %s\n", k8sMetadata.NodeName)
+			}
+			if k8sMetadata.PodIP != "" {
+				fmt.Printf("    Pod IP: %s\n", k8sMetadata.PodIP)
+			}
+		} else {
+			fmt.Printf("\n  Kubernetes: Not detected\n")
+		}
+
+		if len(cfg.Tags) > 0 {
+			fmt.Printf("\n  Global Tags (%d):\n", len(cfg.Tags))
+			for k, v := range cfg.Tags {
+				fmt.Printf("    %s: %s\n", k, v)
+			}
+		}
+
 		os.Exit(0)
 	}
 
 	// Handle test flag - test API connection
 	if *testAPIFlag {
 		fmt.Println("Sending connectivity test events...")
+		if len(cfg.Tags) > 0 {
+			fmt.Printf("  Including %d global tags in test events\n", len(cfg.Tags))
+		}
 		fwd := forwarder.NewWithOptions(cfg.APIEndpoint, cfg.APIKey, forwarderOptionsFromConfig(cfg))
-		report, err := fwd.Test(cfg.ServiceName, cfg.Environment)
+		report, err := fwd.Test(cfg.ServiceName, cfg.Environment, cfg.Tags)
 
 		var (
 			latency time.Duration
@@ -260,11 +334,13 @@ func main() {
 
 	// Handle daemon mode
 	if isDaemon {
-		if err := daemon.Start(resolvedConfigPath, *logFile, isVerbose); err != nil {
+		pidPath := getInstancePIDPath(*instanceName)
+		logPath := getInstanceLogPath(*instanceName)
+		if err := daemon.Start(resolvedConfigPath, *logFile, pidPath, isVerbose); err != nil {
 			log.Fatalf("[Sidecar] Failed to start daemon: %v", err)
 		}
 		fmt.Println("✓ Sidecar started in background")
-		fmt.Println("  Check logs with: tail -f", daemon.GetLogPath())
+		fmt.Println("  Check logs with: tail -f", daemon.GetLogPath(logPath))
 		fmt.Println("  Manage with: yaat-sidecar --status | --stop | --restart")
 		os.Exit(0)
 	}
@@ -276,6 +352,56 @@ func main() {
 	log.Printf("[Sidecar] API endpoint: %s", cfg.APIEndpoint)
 	log.Printf("[Sidecar] Buffer size: %d events", cfg.BufferSize)
 	log.Printf("[Sidecar] Flush interval: %v", cfg.FlushIntervalDuration)
+
+	// Log detected cloud provider and Kubernetes metadata
+	if cloudMetadata != nil && cloudMetadata.Provider != "unknown" {
+		log.Printf("[Sidecar] Cloud provider: %s (region: %s, instance: %s)",
+			cloudMetadata.Provider, cloudMetadata.Region, cloudMetadata.InstanceID)
+	}
+	if k8sMetadata != nil && k8sMetadata.InCluster {
+		log.Printf("[Sidecar] Kubernetes: pod=%s, namespace=%s, node=%s",
+			k8sMetadata.PodName, k8sMetadata.Namespace, k8sMetadata.NodeName)
+	}
+	if len(cfg.Tags) > 0 {
+		log.Printf("[Sidecar] Global tags: %d configured", len(cfg.Tags))
+	}
+
+	// Initialize analytics writer
+	var analyticsWriter *analytics.Writer
+	if cfg.Analytics.Enabled {
+		// Determine organization ID for local storage
+		orgID := cfg.OrganizationID
+		if orgID == "" {
+			orgID = "local" // Local-only mode
+		}
+
+		aw, err := analytics.NewWriter(analytics.Config{
+			DatabasePath:   cfg.Analytics.DatabasePath,
+			OrganizationID: orgID,
+			ServiceName:    cfg.ServiceName,
+			Environment:    cfg.Environment,
+			RetentionDays:  cfg.Analytics.RetentionDays,
+			MaxSizeGB:      cfg.Analytics.MaxSizeGB,
+			BatchSize:      cfg.Analytics.BatchSize,
+			WriteTimeout:   cfg.Analytics.TimeoutDuration,
+		})
+		if err != nil {
+			log.Printf("[Analytics] Failed to initialize: %v. Continuing without local analytics.", err)
+		} else {
+			analyticsWriter = aw
+			defer analyticsWriter.Close()
+
+			// Start retention cleanup (runs daily at 3am)
+			analyticsWriter.StartRetentionCleanup(24 * time.Hour)
+
+			// Log mode
+			mode := "cloud + local"
+			if cfg.APIKey == "" {
+				mode = "local-only"
+			}
+			log.Printf("[Analytics] Enabled (%s): %s", mode, cfg.Analytics.DatabasePath)
+		}
+	}
 
 	// Create event buffer
 	buf := buffer.New(cfg.BufferSize)
@@ -295,7 +421,7 @@ func main() {
 	var stopMetrics func()
 	var stopStatsd func()
 	if cfg.Metrics.Enabled {
-		collector, err := metrics.NewCollector(cfg.ServiceName, cfg.Environment, cfg.Metrics, buf)
+		collector, err := metrics.NewCollector(cfg.OrganizationID, cfg.ServiceName, cfg.Environment, cfg.Tags, cfg.Metrics, buf)
 		if err != nil {
 			log.Printf("[Sidecar] Host metrics disabled: %v", err)
 		} else {
@@ -314,7 +440,7 @@ func main() {
 					}
 				}
 			}
-			statsdServer := statsd.New(statsdCfg, cfg.ServiceName, cfg.Environment, buf)
+			statsdServer := statsd.New(statsdCfg, cfg.OrganizationID, cfg.ServiceName, cfg.Environment, cfg.Tags, buf)
 			stop, err := statsdServer.Start()
 			if err != nil {
 				log.Printf("[Sidecar] StatsD listener disabled: %v", err)
@@ -330,7 +456,7 @@ func main() {
 
 	// Start periodic flusher
 	stopFlusher := make(chan struct{})
-	go periodicFlusher(buf, fwd, cfg.FlushIntervalDuration, stopFlusher, queueStore, cfg.Delivery.QueueRetentionDuration, cfg.Delivery.DeadLetterRetentionDuration)
+	go periodicFlusher(buf, fwd, cfg.FlushIntervalDuration, stopFlusher, queueStore, cfg.Delivery.QueueRetentionDuration, cfg.Delivery.DeadLetterRetentionDuration, analyticsWriter, cfg.APIKey)
 
 	// Start log tailers
 	var journaldTailers []*logs.JournaldTailer
@@ -339,7 +465,7 @@ func main() {
 		for _, logCfg := range cfg.Logs {
 			format := strings.ToLower(logCfg.Format)
 			if format == "journald" {
-				tailer := logs.NewJournaldTailer(cfg.ServiceName, cfg.Environment, buf)
+				tailer := logs.NewJournaldTailer(cfg.OrganizationID, cfg.ServiceName, cfg.Environment, cfg.Tags, buf)
 				if err := tailer.Start(logCfg.Path); err != nil {
 					log.Printf("[Sidecar] Failed to start journald tailer (%s): %v", logCfg.Path, err)
 				} else {
@@ -349,7 +475,7 @@ func main() {
 				continue
 			}
 
-			tailer := logs.New(logCfg.Path, logCfg.Format, cfg.ServiceName, cfg.Environment, buf)
+			tailer := logs.New(logCfg.Path, logCfg.Format, cfg.OrganizationID, cfg.ServiceName, cfg.Environment, cfg.Tags, buf)
 			if err := tailer.Start(); err != nil {
 				log.Printf("[Sidecar] Failed to start tailer for %s: %v", logCfg.Path, err)
 			} else {
@@ -366,8 +492,10 @@ func main() {
 		proxy, err := proxy.New(
 			cfg.Proxy.ListenPort,
 			cfg.Proxy.UpstreamURL,
+			cfg.OrganizationID,
 			cfg.ServiceName,
 			cfg.Environment,
+			cfg.Tags,
 			buf,
 		)
 		if err != nil {
@@ -422,16 +550,27 @@ func main() {
 	updateQueueMetrics(buf, queueStore)
 	if len(events) > 0 {
 		log.Printf("[Sidecar] Flushing %d remaining events...", len(events))
-		if err := fwd.Send(events); err != nil {
-			log.Printf("[Sidecar] Failed to flush events: %v", err)
-			diag.Global().RecordSendFailure(err, len(events))
-			if queueStore != nil {
-				if enqueueErr := queueStore.Enqueue(events); enqueueErr != nil {
-					log.Printf("[Sidecar] Failed to enqueue events to persistent queue: %v", enqueueErr)
-				}
+
+		// Write to local analytics
+		if analyticsWriter != nil {
+			if err := analyticsWriter.Write(events); err != nil {
+				log.Printf("[Analytics] Shutdown write failed: %v", err)
 			}
-		} else {
-			diag.Global().RecordSendSuccess(len(events))
+		}
+
+		// Forward to cloud (only if api_key is set)
+		if cfg.APIKey != "" {
+			if err := fwd.Send(events); err != nil {
+				log.Printf("[Sidecar] Failed to flush events: %v", err)
+				diag.Global().RecordSendFailure(err, len(events))
+				if queueStore != nil {
+					if enqueueErr := queueStore.Enqueue(events); enqueueErr != nil {
+						log.Printf("[Sidecar] Failed to enqueue events to persistent queue: %v", enqueueErr)
+					}
+				}
+			} else {
+				diag.Global().RecordSendSuccess(len(events))
+			}
 		}
 	}
 	updateQueueMetrics(buf, queueStore)
@@ -440,7 +579,7 @@ func main() {
 }
 
 // periodicFlusher flushes the buffer periodically
-func periodicFlusher(buf *buffer.Buffer, fwd *forwarder.Forwarder, interval time.Duration, stop chan struct{}, store *queue.Storage, queueRetention, dlqRetention time.Duration) {
+func periodicFlusher(buf *buffer.Buffer, fwd *forwarder.Forwarder, interval time.Duration, stop chan struct{}, store *queue.Storage, queueRetention, dlqRetention time.Duration, analyticsWriter *analytics.Writer, apiKey string) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -461,17 +600,31 @@ func periodicFlusher(buf *buffer.Buffer, fwd *forwarder.Forwarder, interval time
 			}
 
 			log.Printf("[Flusher] Flushing %d events...", len(events))
-			if err := fwd.Send(events); err != nil {
-				log.Printf("[Flusher] Failed to send events: %v", err)
-				diag.Global().RecordSendFailure(err, len(events))
-				if store != nil {
-					if enqueueErr := store.Enqueue(events); enqueueErr != nil {
-						log.Printf("[Flusher] Failed to enqueue events to persistent queue: %v", enqueueErr)
+
+			// Write to local analytics (async, non-blocking)
+			if analyticsWriter != nil {
+				if err := analyticsWriter.Write(events); err != nil {
+					log.Printf("[Analytics] Write failed: %v", err)
+				}
+			}
+
+			// Forward to cloud API (only if api_key is set)
+			if apiKey != "" {
+				if err := fwd.Send(events); err != nil {
+					log.Printf("[Flusher] Failed to send events: %v", err)
+					diag.Global().RecordSendFailure(err, len(events))
+					if store != nil {
+						if enqueueErr := store.Enqueue(events); enqueueErr != nil {
+							log.Printf("[Flusher] Failed to enqueue events to persistent queue: %v", enqueueErr)
+						}
+						updateQueueMetrics(buf, store)
 					}
-					updateQueueMetrics(buf, store)
+				} else {
+					diag.Global().RecordSendSuccess(len(events))
 				}
 			} else {
-				diag.Global().RecordSendSuccess(len(events))
+				// Local-only mode - no cloud forwarding
+				log.Printf("[Flusher] Local-only mode: %d events stored locally", len(events))
 			}
 
 		case <-stop:
@@ -574,13 +727,8 @@ func setupLogging(logFilePath string, verbose bool) {
 // getOS returns the current operating system
 func getOS() string {
 	switch {
-	case os.Getenv("OS") == "Windows_NT":
-		return "windows"
 	default:
-		// Check for Darwin or Linux
-		if _, err := os.Stat("/System/Library/CoreServices/SystemVersion.plist"); err == nil {
-			return "darwin"
-		}
+		// Linux-only sidecar
 		return "linux"
 	}
 }
@@ -611,4 +759,50 @@ func forwarderOptionsFromConfig(cfg *config.Config) forwarder.Options {
 		Compress:      cfg.Delivery.Compress,
 		MaxBatchBytes: cfg.Delivery.MaxBatchBytes,
 	}
+}
+
+// getInstancePIDPath returns the instance-specific PID file path
+func getInstancePIDPath(instance string) string {
+	if instance == "default" {
+		return "/var/run/yaat-sidecar.pid"
+	}
+	return fmt.Sprintf("/var/run/yaat-%s.pid", instance)
+}
+
+// getInstanceLogPath returns the instance-specific log file path
+func getInstanceLogPath(instance string) string {
+	if instance == "default" {
+		return "/var/log/yaat-sidecar.log"
+	}
+	return fmt.Sprintf("/var/log/yaat-%s.log", instance)
+}
+
+// getInstanceConfigPath returns the instance-specific config path
+func getInstanceConfigPath(instance, configPath string) string {
+	// If user explicitly provided a config path, use it as-is
+	if configPath != "yaat.yaml" {
+		return configPath
+	}
+
+	// Otherwise, use instance-specific path
+	if instance == "default" {
+		return configPath // Use the default "yaat.yaml"
+	}
+	return fmt.Sprintf("%s.yaml", instance)
+}
+
+// getInstanceQueueDir returns the instance-specific queue directory
+func getInstanceQueueDir(instance string) string {
+	if instance == "default" {
+		return "/var/lib/yaat/queue"
+	}
+	return fmt.Sprintf("/var/lib/yaat/%s/queue", instance)
+}
+
+// getInstanceStateDir returns the instance-specific state directory
+func getInstanceStateDir(instance string) string {
+	if instance == "default" {
+		return "/var/lib/yaat/state"
+	}
+	return fmt.Sprintf("/var/lib/yaat/%s/state", instance)
 }

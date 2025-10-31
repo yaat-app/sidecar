@@ -87,8 +87,8 @@ func TestSendSuccess(t *testing.T) {
 	})
 
 	events := []buffer.Event{
-		{"id": "1", "service_name": "test"},
-		{"id": "2", "service_name": "test"},
+		{"organization_id": "org_test123", "id": "1", "service_name": "test"},
+		{"organization_id": "org_test123", "id": "2", "service_name": "test"},
 	}
 
 	if err := f.Send(events); err != nil {
@@ -108,7 +108,7 @@ func TestSendUnauthorized(t *testing.T) {
 			}, nil
 		}),
 	})
-	events := []buffer.Event{{"id": "1", "service_name": "test"}}
+	events := []buffer.Event{{"organization_id": "org_test123", "id": "1", "service_name": "test"}}
 
 	err := f.Send(events)
 
@@ -132,7 +132,7 @@ func TestSendServerError(t *testing.T) {
 			}, nil
 		}),
 	})
-	events := []buffer.Event{{"id": "1", "service_name": "test"}}
+	events := []buffer.Event{{"organization_id": "org_test123", "id": "1", "service_name": "test"}}
 
 	err := f.Send(events)
 

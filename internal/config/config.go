@@ -26,9 +26,11 @@ type LogConfig struct {
 
 // Config represents the sidecar configuration
 type Config struct {
-	APIKey        string          `yaml:"api_key"`
-	ServiceName   string          `yaml:"service_name"`
-	Environment   string          `yaml:"environment"`
+	OrganizationID string          `yaml:"organization_id"`
+	APIKey         string          `yaml:"api_key"`
+	ServiceName    string          `yaml:"service_name"`
+	Environment    string          `yaml:"environment"`
+	Tags           map[string]string `yaml:"tags,omitempty"`     // Global tags for all events
 	Proxy         ProxyConfig     `yaml:"proxy"`
 	Logs          []LogConfig     `yaml:"logs"`
 	BufferSize    int             `yaml:"buffer_size"`
@@ -37,6 +39,7 @@ type Config struct {
 	Delivery      DeliveryConfig  `yaml:"delivery"`
 	Metrics       MetricsConfig   `yaml:"metrics"`
 	Scrubbing     ScrubbingConfig `yaml:"scrubbing"`
+	Analytics     AnalyticsConfig `yaml:"analytics"`
 
 	// Parsed flush interval
 	FlushIntervalDuration time.Duration `yaml:"-"`
@@ -87,6 +90,17 @@ type ScrubRule struct {
 	Drop        bool     `yaml:"drop,omitempty"`
 }
 
+// AnalyticsConfig controls local DuckDB analytics storage.
+type AnalyticsConfig struct {
+	Enabled          bool              `yaml:"enabled"`
+	DatabasePath     string            `yaml:"database_path"`
+	RetentionDays    int               `yaml:"retention_days"`
+	MaxSizeGB        float64           `yaml:"max_size_gb"`
+	BatchSize        int               `yaml:"batch_size"`
+	WriteTimeout     string            `yaml:"write_timeout"`
+	TimeoutDuration  time.Duration     `yaml:"-"`
+}
+
 // LoadConfig loads configuration from a YAML file
 func LoadConfig(path string) (*Config, error) {
 	data, resolvedPath, err := readConfig(path)
@@ -117,6 +131,10 @@ func CreateSampleConfig(path string) error {
 	sampleConfig := `# YAAT Sidecar Configuration
 # For more information, visit: https://docs.yaat.io
 
+# Your YAAT organization ID (required)
+# Get this from: https://yaat.io → Settings → Organization
+organization_id: "org_your_organization_id_here"
+
 # Your YAAT organization API key (required)
 # Get this from: https://yaat.io → Settings → API Keys
 api_key: "yaat_your_api_key_here"
@@ -128,6 +146,15 @@ service_name: "my-service"
 # Environment (optional, default: production)
 # Examples: production, staging, development
 environment: "production"
+
+# Global Tags (optional)
+# Tags applied to all events (logs, spans, metrics)
+# Cloud provider (AWS/GCP/Azure) and Kubernetes metadata are auto-detected
+# and merged with custom tags. Custom tags take priority.
+# tags:
+#   team: "backend"
+#   version: "v1.2.3"
+#   region: "us-west-2"
 
 # HTTP Proxy Configuration (optional)
 # Monitor HTTP traffic by proxying requests to your application
@@ -189,9 +216,21 @@ scrubbing:
       replacement: "[EMAIL]"
       fields: ["message", "stacktrace", "tags.*"]
 
-# YAAT API endpoint (required)
+# Local Analytics (DuckDB)
+# Store events locally for instant SQL queries
+# Works offline (no API key needed) or alongside cloud sync
+analytics:
+  enabled: true                 # Enable local analytics database
+  database_path: "~/.yaat/analytics.db"  # Local database file
+  retention_days: 14            # Keep events for 14 days
+  max_size_gb: 2.0              # Max database size (auto-cleanup when exceeded)
+  batch_size: 500               # Events per transaction
+  write_timeout: "5s"           # Per-batch write timeout
+
+# YAAT API endpoint (required for cloud mode)
 # Production: https://yaat.io/api/v1/ingest
 # Staging: https://staging.yaat.io/api/v1/ingest
+# Leave blank or omit api_key for local-only mode
 api_endpoint: "https://yaat.io/api/v1/ingest"
 `
 
@@ -250,15 +289,20 @@ func DefaultConfigPath() string {
 }
 
 func (cfg *Config) validate() error {
-	if cfg.APIKey == "" {
-		return fmt.Errorf("api_key is required")
-	}
 	if cfg.ServiceName == "" {
 		return fmt.Errorf("service_name is required")
 	}
-	if cfg.APIEndpoint == "" {
-		return fmt.Errorf("api_endpoint is required")
+
+	// API key and organization ID are not required in local-only mode
+	if cfg.APIKey != "" {
+		if cfg.OrganizationID == "" {
+			return fmt.Errorf("organization_id is required when api_key is set")
+		}
+		if cfg.APIEndpoint == "" {
+			return fmt.Errorf("api_endpoint is required when api_key is set")
+		}
 	}
+
 	return nil
 }
 
@@ -323,6 +367,35 @@ func (cfg *Config) applyDefaults() error {
 		return fmt.Errorf("invalid flush_interval: %w", err)
 	}
 	cfg.FlushIntervalDuration = duration
+
+	// Analytics defaults
+	if cfg.Analytics.DatabasePath == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			cfg.Analytics.DatabasePath = filepath.Join(home, ".yaat", "analytics.db")
+		} else {
+			cfg.Analytics.DatabasePath = ".yaat/analytics.db"
+		}
+	}
+	if cfg.Analytics.RetentionDays == 0 {
+		cfg.Analytics.RetentionDays = 14
+	}
+	if cfg.Analytics.MaxSizeGB == 0 {
+		cfg.Analytics.MaxSizeGB = 2.0
+	}
+	if cfg.Analytics.BatchSize == 0 {
+		cfg.Analytics.BatchSize = 500
+	}
+	if cfg.Analytics.WriteTimeout == "" {
+		cfg.Analytics.WriteTimeout = "5s"
+	}
+	if cfg.Analytics.WriteTimeout != "" {
+		dur, err := time.ParseDuration(cfg.Analytics.WriteTimeout)
+		if err != nil {
+			return fmt.Errorf("invalid analytics.write_timeout: %w", err)
+		}
+		cfg.Analytics.TimeoutDuration = dur
+	}
+
 	return nil
 }
 

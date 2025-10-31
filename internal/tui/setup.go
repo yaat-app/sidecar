@@ -15,7 +15,8 @@ import (
 type setupStep int
 
 const (
-	stepAPIKey setupStep = iota
+	stepOrganizationID setupStep = iota
+	stepAPIKey
 	stepServiceName
 	stepEnvironment
 	stepLogFiles
@@ -25,10 +26,11 @@ const (
 )
 
 type SetupWizard struct {
-	step        setupStep
-	apiKey      textinput.Model
-	serviceName textinput.Model
-	environment int // 0=production, 1=staging, 2=development
+	step           setupStep
+	organizationID textinput.Model
+	apiKey         textinput.Model
+	serviceName    textinput.Model
+	environment    int // 0=production, 1=staging, 2=development
 
 	// Log file selection
 	detectedLogs []detection.LogFile
@@ -40,6 +42,10 @@ type SetupWizard struct {
 	scrubSelected map[int]bool
 	scrubCursor   int
 
+	// Detected environment
+	cloudMetadata *detection.CloudProvider
+	k8sMetadata   *detection.KubernetesMetadata
+
 	// State
 	err        error
 	saved      bool
@@ -48,9 +54,13 @@ type SetupWizard struct {
 
 func NewSetupWizard() *SetupWizard {
 	// Create text inputs
+	organizationID := textinput.New()
+	organizationID.Placeholder = "org_xxxxxxxxxxxxxxxxxxxxx"
+	organizationID.Focus()
+	organizationID.Width = 50
+
 	apiKey := textinput.New()
 	apiKey.Placeholder = "yaat_..."
-	apiKey.Focus()
 	apiKey.Width = 50
 	apiKey.EchoMode = textinput.EchoPassword
 	apiKey.EchoCharacter = '*'
@@ -59,13 +69,17 @@ func NewSetupWizard() *SetupWizard {
 	serviceName.Placeholder = "my-service"
 	serviceName.Width = 50
 
-	// Auto-detect hostname as default service name
-	if hostname, err := os.Hostname(); err == nil {
+	// Auto-detect environment (logs, cloud, k8s)
+	env := detection.DetectEnvironment()
+	cloud := detection.DetectCloudProvider()
+	k8s := detection.DetectKubernetesMetadata()
+
+	// Auto-detect service name: prefer k8s pod name > hostname
+	if k8s.InCluster && k8s.PodName != "" {
+		serviceName.SetValue(k8s.PodName)
+	} else if hostname, err := os.Hostname(); err == nil {
 		serviceName.SetValue(hostname)
 	}
-
-	// Auto-detect log files
-	env := detection.DetectEnvironment()
 	recommended := config.RecommendedScrubRules()
 	selectedScrub := make(map[int]bool, len(recommended))
 	for idx := range recommended {
@@ -80,22 +94,32 @@ func NewSetupWizard() *SetupWizard {
 	}
 
 	return &SetupWizard{
-		step:          stepAPIKey,
-		apiKey:        apiKey,
-		serviceName:   serviceName,
-		environment:   0, // Default to production
-		detectedLogs:  env.LogFiles,
-		selectedLogs:  selectedLogs,
-		scrubOptions:  recommended,
-		scrubSelected: selectedScrub,
-		configPath:    os.ExpandEnv("$HOME/.yaat/yaat.yaml"),
+		step:           stepOrganizationID,
+		organizationID: organizationID,
+		apiKey:         apiKey,
+		serviceName:    serviceName,
+		environment:    0, // Default to production
+		detectedLogs:   env.LogFiles,
+		selectedLogs:   selectedLogs,
+		scrubOptions:   recommended,
+		scrubSelected:  selectedScrub,
+		cloudMetadata:  cloud,
+		k8sMetadata:    k8s,
+		configPath:     os.ExpandEnv("$HOME/.yaat/yaat.yaml"),
 	}
 }
 
 func (s *SetupWizard) Update(msg tea.Msg) (*SetupWizard, tea.Cmd) {
 	// Handle text input steps FIRST (before global shortcuts)
 	var cmd tea.Cmd
-	if s.step == stepAPIKey {
+	if s.step == stepOrganizationID {
+		// Let text input handle all keys except Enter to proceed
+		if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "enter" {
+			return s.nextStep()
+		}
+		s.organizationID, cmd = s.organizationID.Update(msg)
+		return s, cmd
+	} else if s.step == stepAPIKey {
 		// Let text input handle all keys except Enter to proceed
 		if keyMsg, ok := msg.(tea.KeyMsg); ok && keyMsg.String() == "enter" {
 			return s.nextStep()
@@ -166,6 +190,15 @@ func (s *SetupWizard) Update(msg tea.Msg) (*SetupWizard, tea.Cmd) {
 
 func (s *SetupWizard) nextStep() (*SetupWizard, tea.Cmd) {
 	switch s.step {
+	case stepOrganizationID:
+		if s.organizationID.Value() == "" {
+			s.err = fmt.Errorf("Organization ID is required")
+			return s, nil
+		}
+		s.err = nil
+		s.step = stepAPIKey
+		s.apiKey.Focus()
+
 	case stepAPIKey:
 		if s.apiKey.Value() == "" {
 			s.err = fmt.Errorf("API key is required")
@@ -234,10 +267,25 @@ func (s *SetupWizard) saveConfig() error {
 	// Build config
 	envName := []string{"production", "staging", "development"}[s.environment]
 
+	// Merge detected tags from cloud and k8s
+	tags := make(map[string]string)
+	if s.cloudMetadata != nil {
+		for k, v := range s.cloudMetadata.Tags {
+			tags[k] = v
+		}
+	}
+	if s.k8sMetadata != nil {
+		for k, v := range s.k8sMetadata.Tags {
+			tags[k] = v
+		}
+	}
+
 	cfg := &config.Config{
-		APIKey:        s.apiKey.Value(),
-		ServiceName:   s.serviceName.Value(),
-		Environment:   envName,
+		OrganizationID: s.organizationID.Value(),
+		APIKey:         s.apiKey.Value(),
+		ServiceName:    s.serviceName.Value(),
+		Environment:    envName,
+		Tags:           tags,
 		APIEndpoint:   "https://yaat.io/api/v1/ingest",
 		BufferSize:    1000,
 		FlushInterval: "10s",
@@ -275,6 +323,8 @@ func (s *SetupWizard) View() string {
 	header := TitleStyle.Render("Setup Wizard") + "\n\n"
 
 	switch s.step {
+	case stepOrganizationID:
+		content = s.renderOrganizationIDStep()
 	case stepAPIKey:
 		content = s.renderAPIKeyStep()
 	case stepServiceName:
@@ -302,8 +352,16 @@ func (s *SetupWizard) View() string {
 	return BaseStyle.Render(header+content+help) + "\n"
 }
 
+func (s *SetupWizard) renderOrganizationIDStep() string {
+	title := SectionHeaderStyle.Render("Step 1 of 7: Organization ID") + "\n\n"
+	desc := MutedStyle.Render("Enter your YAAT organization ID") + "\n"
+	desc += MutedStyle.Render("Get it from: https://yaat.io/settings") + "\n\n"
+
+	return title + desc + s.organizationID.View() + "\n"
+}
+
 func (s *SetupWizard) renderAPIKeyStep() string {
-	title := SectionHeaderStyle.Render("Step 1 of 6: API Key") + "\n\n"
+	title := SectionHeaderStyle.Render("Step 2 of 7: API Key") + "\n\n"
 	desc := MutedStyle.Render("Enter your YAAT API key") + "\n"
 	desc += MutedStyle.Render("Get it from: https://yaat.io/settings") + "\n\n"
 
@@ -311,14 +369,14 @@ func (s *SetupWizard) renderAPIKeyStep() string {
 }
 
 func (s *SetupWizard) renderServiceNameStep() string {
-	title := SectionHeaderStyle.Render("Step 2 of 6: Service Name") + "\n\n"
+	title := SectionHeaderStyle.Render("Step 3 of 7: Service Name") + "\n\n"
 	desc := MutedStyle.Render("Name for this service") + "\n\n"
 
 	return title + desc + s.serviceName.View() + "\n"
 }
 
 func (s *SetupWizard) renderEnvironmentStep() string {
-	title := SectionHeaderStyle.Render("Step 3 of 6: Environment") + "\n\n"
+	title := SectionHeaderStyle.Render("Step 4 of 7: Environment") + "\n\n"
 	desc := MutedStyle.Render("Select environment type") + "\n\n"
 
 	options := []string{"Production", "Staging", "Development"}
@@ -338,7 +396,7 @@ func (s *SetupWizard) renderEnvironmentStep() string {
 }
 
 func (s *SetupWizard) renderLogFilesStep() string {
-	title := SectionHeaderStyle.Render("Step 4 of 6: Log Files") + "\n\n"
+	title := SectionHeaderStyle.Render("Step 5 of 7: Log Files") + "\n\n"
 	desc := MutedStyle.Render(fmt.Sprintf("Found %d log files - select which to monitor", len(s.detectedLogs))) + "\n"
 	if len(s.detectedLogs) > 0 {
 		desc += MutedStyle.Render("Readable sources are pre-selected for you. Press space to adjust.") + "\n\n"
@@ -383,7 +441,7 @@ func (s *SetupWizard) renderLogFilesStep() string {
 }
 
 func (s *SetupWizard) renderScrubbingStep() string {
-	title := SectionHeaderStyle.Render("Step 5 of 6: Data Scrubbing") + "\n\n"
+	title := SectionHeaderStyle.Render("Step 6 of 7: Data Scrubbing") + "\n\n"
 	desc := MutedStyle.Render("Select scrubbing rules to prevent sensitive data from leaving this machine") + "\n\n"
 
 	if len(s.scrubOptions) == 0 {
@@ -414,9 +472,10 @@ func (s *SetupWizard) renderScrubbingStep() string {
 }
 
 func (s *SetupWizard) renderReviewStep() string {
-	title := SectionHeaderStyle.Render("Step 6 of 6: Review") + "\n\n"
+	title := SectionHeaderStyle.Render("Step 7 of 7: Review") + "\n\n"
 
-	content := LabelStyle.Render("Service Name:  ") + ValueStyle.Render(s.serviceName.Value()) + "\n"
+	content := LabelStyle.Render("Organization:  ") + ValueStyle.Render(s.organizationID.Value()) + "\n"
+	content += LabelStyle.Render("Service Name:  ") + ValueStyle.Render(s.serviceName.Value()) + "\n"
 	content += LabelStyle.Render("Environment:   ") + ValueStyle.Render([]string{"production", "staging", "development"}[s.environment]) + "\n"
 	content += LabelStyle.Render("API Key:       ") + ValueStyle.Render(maskKey(s.apiKey.Value())) + "\n"
 

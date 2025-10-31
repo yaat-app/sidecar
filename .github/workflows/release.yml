@@ -22,8 +22,14 @@ jobs:
         with:
           go-version: '1.22'
 
-      - name: Run tests
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+
+      - name: Run tests (without CGO)
         run: CGO_ENABLED=0 go test -vet=off -v ./...
+
+      - name: Run tests (with CGO for DuckDB)
+        run: CGO_ENABLED=1 go test -vet=off -v ./...
 
   build:
     name: Build Binaries
@@ -32,33 +38,23 @@ jobs:
     strategy:
       matrix:
         include:
-          # Linux
+          # Linux only (server deployments)
           - goos: linux
             goarch: amd64
             output: yaat-sidecar-linux-amd64
-            requires_cgo: false
+            requires_cgo: true
           - goos: linux
             goarch: arm64
             output: yaat-sidecar-linux-arm64
-            requires_cgo: false
-
-          # macOS
-          - goos: darwin
-            goarch: amd64
-            output: yaat-sidecar-darwin-amd64
-            requires_cgo: false
-          - goos: darwin
-            goarch: arm64
-            output: yaat-sidecar-darwin-arm64
-            requires_cgo: false
+            requires_cgo: true
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install system dependencies (linux only)
+      - name: Install build dependencies (CGO + DuckDB)
         if: ${{ matrix.requires_cgo == true }}
-        run: sudo apt-get update && sudo apt-get install -y libsystemd-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y build-essential gcc-aarch64-linux-gnu
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -69,6 +65,10 @@ jobs:
         run: |
           if [ "${{ matrix.requires_cgo }}" = "true" ]; then
             export CGO_ENABLED=1
+            # Set cross-compiler for ARM64
+            if [ "${{ matrix.goarch }}" = "arm64" ]; then
+              export CC=aarch64-linux-gnu-gcc
+            fi
           else
             export CGO_ENABLED=0
           fi

@@ -15,7 +15,7 @@ Backend monitoring agent for the YAAT analytics platform. Monitor your productio
 - **🐳 Container Aware**: Autodetects Docker/Kubernetes stdout files and parses Docker JSON envelopes out of the box
 - **🚀 Zero Code Changes**: Deploy as a sidecar alongside your application - pure observation mode
 - **🔄 Buffered Delivery**: Efficient batching with automatic retry and exponential backoff
-- **🌍 Multi-Platform**: Linux and macOS support (Windows via WSL2)
+- **🐧 Linux-First**: Optimized for production Linux servers (amd64 + arm64)
 - **✨ Auto-Detection**: Automatically discovers services, log files, and optimal configurations
 - **🔌 Plug & Play**: Interactive setup wizard gets you running in seconds
 - **🛡 Sensitive Data Scrubbing**: Regex-driven redaction and drop rules prevent secrets from leaving your host
@@ -24,7 +24,7 @@ Backend monitoring agent for the YAAT analytics platform. Monitor your productio
 
 ### Quick Install (Recommended)
 
-One-line installation for Linux and macOS:
+One-line installation for Linux servers:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/yaat-app/sidecar/main/install.sh | bash
@@ -33,44 +33,34 @@ curl -sSL https://raw.githubusercontent.com/yaat-app/sidecar/main/install.sh | b
 The installer:
 - Detects your OS/architecture and downloads the latest release
 - Installs the binary to `/usr/local/bin/yaat-sidecar`
-- Creates platform-specific directories for config/state/logs
-- Offers to install a systemd unit (Linux) or launchd daemon (macOS) so the agent can run as a service
+- Creates Linux directories for config/state/logs
+- Offers to install a systemd unit so the agent can run as a service
 
 After the installer finishes, run the setup wizard as the service user:
 
 ```bash
-# Linux (systemd user 'yaat')
 sudo -u yaat yaat-sidecar --setup --config /etc/yaat/yaat.yaml
-
-# macOS (root-owned launchd daemon)
-sudo yaat-sidecar --setup --config /usr/local/etc/yaat/yaat.yaml
 ```
 
 Once the setup wizard finishes, start the background service:
 
 ```bash
-# Linux
 sudo systemctl start yaat-sidecar
-
-# macOS
-sudo launchctl load -w /Library/LaunchDaemons/io.yaat.sidecar.plist
 ```
 
 ### Manual Installation
 
 1. **Download the binary for your platform** from the [latest release](https://github.com/yaat-app/sidecar/releases/latest):
 
-   - **Linux (amd64)**: `yaat-sidecar-linux-amd64.tar.gz`
-   - **Linux (arm64)**: `yaat-sidecar-linux-arm64.tar.gz`
-   - **macOS (Intel)**: `yaat-sidecar-darwin-amd64.tar.gz`
-   - **macOS (Apple Silicon)**: `yaat-sidecar-darwin-arm64.tar.gz`
+   - **Linux (amd64/x86_64)**: `yaat-sidecar-linux-amd64.tar.gz`
+   - **Linux (arm64/aarch64)**: `yaat-sidecar-linux-arm64.tar.gz`
 
-   > **Windows Users**: Use [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) and install the Linux version.
+   > **Note**: For development/testing on macOS or Windows, build from source with `go build ./cmd`
 
 2. **Extract and install**:
 
    ```bash
-   # Extract (Linux/macOS)
+   # Extract
    tar -xzf yaat-sidecar-*.tar.gz
 
    # Make executable and move to PATH
@@ -151,10 +141,9 @@ Visit your YAAT dashboard at [yaat.io](https://yaat.io) → **Services** to see 
 
 ## Service Locations & Files
 
-| Platform | Config Path | Logs | State | Service |
-|----------|-------------|------|-------|---------|
-| Linux    | `/etc/yaat/yaat.yaml` | `/var/log/yaat/sidecar.log` | `/var/lib/yaat` | `systemctl enable yaat-sidecar` |
-| macOS    | `/usr/local/etc/yaat/yaat.yaml` | `/usr/local/var/log/yaat/sidecar.log` | `/usr/local/var/lib/yaat` | `launchctl load -w /Library/LaunchDaemons/io.yaat.sidecar.plist` |
+| Config Path | Logs | State | Service |
+|-------------|------|-------|---------|
+| `/etc/yaat/yaat.yaml` | `/var/log/yaat/sidecar.log` | `/var/lib/yaat` | `systemctl enable yaat-sidecar` |
 
 Use the TUI config editor (`c` → `Enter`) to update credentials, batching, metrics, and log sources at any time. The wizard and editor automatically apply secure permissions to sensitive files.
 
@@ -164,7 +153,7 @@ Use the TUI config editor (`c` → `Enter`) to update credentials, batching, met
 2. **Run the setup wizard** (as shown above) and select the Django log path when prompted. The wizard auto-detects `manage.py`, gunicorn, and container stdout so you can accept defaults.
 3. **Verify connectivity**: `yaat-sidecar --test` sends sample log/span/metric events to ensure the Django service appears in YAAT immediately.
 4. **Optional metrics**: enable host metrics or StatsD in the config editor if your Django stack exposes application metrics.
-5. **Deploy**: start/enable the service; the agent runs as the dedicated `yaat` system user (Linux) or a launchd daemon (macOS) with least-privilege defaults.
+5. **Deploy**: start/enable the service; the agent runs as the dedicated `yaat` system user with least-privilege defaults.
 
 ## Manual configuration (optional)
 

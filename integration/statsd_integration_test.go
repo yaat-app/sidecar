@@ -24,7 +24,7 @@ func TestStatsDServer_ParsesCounter(t *testing.T) {
 		},
 	}
 
-	srv := statsd.New(cfg, "demo-service", "testing", buf)
+	srv := statsd.New(cfg, "org_test123", "demo-service", "testing", nil, buf)
 	stop, err := srv.Start()
 	if err != nil {
 		if strings.Contains(err.Error(), "operation not permitted") {

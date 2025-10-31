@@ -61,9 +61,8 @@ detect_platform() {
 
     case "$OS" in
         linux*) OS="linux" ;;
-        darwin*) OS="darwin" ;;
-        msys*|mingw*|cygwin*|windows*)
-            print_error "Windows is not supported. Use WSL2 and run this script inside WSL."
+        darwin*|msys*|mingw*|cygwin*|windows*)
+            print_error "Only Linux is supported. For development, build from source with 'go build ./cmd'"
             exit 1
             ;;
         *)
@@ -227,87 +226,8 @@ WantedBy=multi-user.target"
     fi
 }
 
-darwin_setup_directories() {
-    local config_dir="/usr/local/etc/yaat"
-    local state_dir="/usr/local/var/lib/yaat"
-    local log_dir="/usr/local/var/log/yaat"
-
-    ensure_directory "$config_dir"
-    ensure_directory "$state_dir"
-    ensure_directory "$log_dir"
-
-    run_root chown "$(id -un)":staff "$state_dir" "$log_dir"
-    run_root chmod 0750 "$state_dir" "$log_dir"
-}
-
-darwin_install_launchd() {
-    if ! have_command launchctl; then
-        print_warning "launchctl not available; skipping launchd installation."
-        return
-    fi
-
-    if ! prompt_yes_no "Install launchd daemon for YAAT Sidecar? [Y/n] " "y"; then
-        print_info "Skipping launchd installation."
-        return
-    fi
-
-    darwin_setup_directories
-
-    local plist_path="/Library/LaunchDaemons/io.yaat.sidecar.plist"
-    local plist_contents="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
-<plist version=\"1.0\">
-<dict>
-    <key>Label</key>
-    <string>io.yaat.sidecar</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>${INSTALL_DIR}/${BINARY_NAME}</string>
-        <string>--config</string>
-        <string>/usr/local/etc/yaat/yaat.yaml</string>
-        <string>--log-file</string>
-        <string>/usr/local/var/log/yaat/sidecar.log</string>
-    </array>
-    <key>WorkingDirectory</key>
-    <string>/usr/local/var/lib/yaat</string>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
-    <key>StandardOutPath</key>
-    <string>/usr/local/var/log/yaat/sidecar.stdout.log</string>
-    <key>StandardErrorPath</key>
-    <string>/usr/local/var/log/yaat/sidecar.stderr.log</string>
-</dict>
-</plist>"
-
-    print_info "Installing launchd plist: ${plist_path}"
-    if [ "$(id -u)" -eq 0 ]; then
-        printf '%s\n' "$plist_contents" > "$plist_path"
-    else
-        printf '%s\n' "$plist_contents" | sudo tee "$plist_path" >/dev/null
-    fi
-
-    run_root chmod 0644 "$plist_path"
-
-    if prompt_yes_no "Load YAAT Sidecar daemon with launchctl now? [Y/n] " "n"; then
-        run_root launchctl load -w "$plist_path"
-        print_info "Daemon loaded. Configure credentials via:"
-        echo "  sudo ${BINARY_NAME} --setup --config /usr/local/etc/yaat/yaat.yaml"
-        echo "  sudo launchctl kickstart -k system/io.yaat.sidecar"
-    else
-        print_info "Daemon installed but not loaded. Configure and load manually when ready."
-    fi
-}
-
 post_install() {
-    case "$OS" in
-        linux) linux_install_service ;;
-        darwin) darwin_install_launchd ;;
-    esac
+    linux_install_service
 }
 
 print_next_steps() {
@@ -316,22 +236,11 @@ print_next_steps() {
     echo -e "${GREEN}  YAAT Sidecar installation complete${NC}"
     echo -e "${GREEN}========================================${NC}"
     echo ""
-    case "$OS" in
-        linux)
-            echo "Configuration (run as the service user):"
-            echo "  sudo -u yaat ${BINARY_NAME} --setup --config /etc/yaat/yaat.yaml"
-            echo ""
-            echo "Start service:"
-            echo "  sudo systemctl start yaat-sidecar"
-            ;;
-        darwin)
-            echo "Configuration:"
-            echo "  sudo ${BINARY_NAME} --setup --config /usr/local/etc/yaat/yaat.yaml"
-            echo ""
-            echo "Start daemon:"
-            echo "  sudo launchctl load -w /Library/LaunchDaemons/io.yaat.sidecar.plist"
-            ;;
-    esac
+    echo "Configuration (run as the service user):"
+    echo "  sudo -u yaat ${BINARY_NAME} --setup --config /etc/yaat/yaat.yaml"
+    echo ""
+    echo "Start service:"
+    echo "  sudo systemctl start yaat-sidecar"
     echo ""
     echo "Dashboard & TUI:"
     echo "  ${BINARY_NAME} --dashboard"

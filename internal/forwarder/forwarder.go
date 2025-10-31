@@ -256,7 +256,7 @@ func isRetryable(err error) bool {
 }
 
 // Test sends a curated batch of test events to validate connectivity.
-func (f *Forwarder) Test(serviceName, environment string) (*TestReport, error) {
+func (f *Forwarder) Test(serviceName, environment string, globalTags map[string]string) (*TestReport, error) {
 	if serviceName == "" {
 		serviceName = "yaat-sidecar"
 	}
@@ -264,7 +264,7 @@ func (f *Forwarder) Test(serviceName, environment string) (*TestReport, error) {
 		environment = "production"
 	}
 
-	events := makeTestEvents(serviceName, environment)
+	events := makeTestEvents(serviceName, environment, globalTags)
 	start := time.Now()
 
 	if err := f.Send(events); err != nil {
@@ -278,8 +278,20 @@ func (f *Forwarder) Test(serviceName, environment string) (*TestReport, error) {
 	}, nil
 }
 
-func makeTestEvents(serviceName, environment string) []buffer.Event {
+func makeTestEvents(serviceName, environment string, globalTags map[string]string) []buffer.Event {
 	now := time.Now().UTC()
+
+	// Helper to merge global tags with event-specific tags
+	mergeTags := func(eventTags map[string]string) map[string]string {
+		merged := make(map[string]string, len(globalTags)+len(eventTags))
+		for k, v := range globalTags {
+			merged[k] = v
+		}
+		for k, v := range eventTags {
+			merged[k] = v
+		}
+		return merged
+	}
 
 	logEvent := buffer.Event{
 		"service_name": serviceName,
@@ -289,11 +301,11 @@ func makeTestEvents(serviceName, environment string) []buffer.Event {
 		"environment":  environment,
 		"level":        "info",
 		"message":      "YAAT Sidecar connectivity test",
-		"tags": map[string]string{
+		"tags": mergeTags(map[string]string{
 			"yaat.sidecar": "true",
 			"yaat.test":    "true",
 			"category":     "connectivity",
-		},
+		}),
 	}
 
 	spanEvent := buffer.Event{
@@ -308,12 +320,12 @@ func makeTestEvents(serviceName, environment string) []buffer.Event {
 		"operation":      "GET /yaat/healthz",
 		"duration_ms":    128.4,
 		"status_code":    200,
-		"tags": map[string]string{
+		"tags": mergeTags(map[string]string{
 			"yaat.sidecar": "true",
 			"yaat.test":    "true",
 			"component":    "proxy",
 			"endpoint":     "/yaat/healthz",
-		},
+		}),
 	}
 
 	metricEvent := buffer.Event{
@@ -324,11 +336,11 @@ func makeTestEvents(serviceName, environment string) []buffer.Event {
 		"environment":  environment,
 		"metric_name":  "yaat.sidecar.test.latency_ms",
 		"metric_value": 128.4,
-		"tags": map[string]string{
+		"tags": mergeTags(map[string]string{
 			"yaat.sidecar": "true",
 			"yaat.test":    "true",
 			"unit":         "milliseconds",
-		},
+		}),
 	}
 
 	return []buffer.Event{logEvent, spanEvent, metricEvent}

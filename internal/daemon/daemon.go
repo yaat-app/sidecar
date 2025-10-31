@@ -15,17 +15,11 @@ import (
 	"github.com/yaat-app/sidecar/internal/config"
 )
 
-const (
-	pidFile = "/var/run/yaat-sidecar.pid"
-	logDir  = "/var/log/yaat"
-	logFile = "/var/log/yaat/sidecar.log"
-)
-
 // Start starts the sidecar as a daemon process
-func Start(configPath, logFilePath string, verbose bool) error {
+func Start(configPath, logFilePath, pidPath string, verbose bool) error {
 	// Check if already running
-	if IsRunning() {
-		return fmt.Errorf("sidecar is already running (PID file exists: %s)", pidFile)
+	if IsRunning(pidPath) {
+		return fmt.Errorf("sidecar is already running (PID file exists: %s)", pidPath)
 	}
 
 	// Get current executable path
@@ -43,10 +37,12 @@ func Start(configPath, logFilePath string, verbose bool) error {
 	// Determine log file path
 	logPath := logFilePath
 	if logPath == "" {
-		logPath = logFile
+		// Use default log path if not specified
+		logPath = "/var/log/yaat-sidecar.log"
 		// Create log directory if it doesn't exist
+		logDir := filepath.Dir(logPath)
 		if err := os.MkdirAll(logDir, 0755); err != nil && !os.IsPermission(err) {
-			// If we can't create /var/log/yaat, use home directory
+			// If we can't create /var/log, use home directory
 			home, _ := os.UserHomeDir()
 			logPath = filepath.Join(home, ".yaat", "sidecar.log")
 			os.MkdirAll(filepath.Dir(logPath), 0755)
@@ -68,7 +64,8 @@ func Start(configPath, logFilePath string, verbose bool) error {
 	}
 
 	// Write PID file
-	pidPath := pidFile
+	// Create PID directory if needed
+	os.MkdirAll(filepath.Dir(pidPath), 0755)
 	if err := writePidFile(pidPath, cmd.Process.Pid); err != nil {
 		// Try user home directory if /var/run is not writable
 		home, _ := os.UserHomeDir()
@@ -86,8 +83,8 @@ func Start(configPath, logFilePath string, verbose bool) error {
 }
 
 // Stop stops the daemon process
-func Stop() error {
-	pid, pidPath, err := readPID()
+func Stop(pidPath string) error {
+	pid, actualPidPath, err := readPID(pidPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("sidecar is not running")
@@ -107,14 +104,14 @@ func Stop() error {
 	}
 
 	// Remove PID file
-	os.Remove(pidPath)
+	os.Remove(actualPidPath)
 
 	return nil
 }
 
 // IsRunning checks if the daemon is currently running
-func IsRunning() bool {
-	pid, _, err := readPID()
+func IsRunning(pidPath string) bool {
+	pid, _, err := readPID(pidPath)
 	if err != nil {
 		return false
 	}
@@ -144,8 +141,9 @@ func Uninstall() ([]string, error) {
 	// Step 1: stop any running processes
 	fmt.Print("→ Stopping running processes... ")
 	stopped := false
-	if IsRunning() {
-		if err := Stop(); err != nil {
+	defaultPidPath := "/var/run/yaat-sidecar.pid"
+	if IsRunning(defaultPidPath) {
+		if err := Stop(defaultPidPath); err != nil {
 			warnings = append(warnings, fmt.Sprintf("stop daemon: %v", err))
 		} else {
 			stopped = true
@@ -166,12 +164,8 @@ func Uninstall() ([]string, error) {
 		fmt.Println("(not running)")
 	}
 
-	// Step 2: remove OS specific services
-	if runtime.GOOS == "darwin" {
-		warnings = append(warnings, removeLaunchAgent()...)
-	} else if runtime.GOOS == "linux" {
-		warnings = append(warnings, removeSystemdUnits()...)
-	}
+	// Step 2: remove systemd service (Linux-only)
+	warnings = append(warnings, removeSystemdUnits()...)
 
 	// Step 3: remove PID files
 	warnings = append(warnings, removePathsGroup("PID files", possiblePidFiles(), true)...)
@@ -251,84 +245,6 @@ func stopResidualProcesses() (bool, error) {
 	}
 
 	return killed, nil
-}
-
-func removeLaunchAgent() []string {
-	fmt.Print("→ Removing macOS launch services... ")
-	var warnings []string
-
-	// Check both LaunchAgent (user) and LaunchDaemon (system)
-	plistPaths := []struct {
-		path   string
-		system bool
-	}{
-		{"/Library/LaunchDaemons/io.yaat.sidecar.plist", true},
-	}
-
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		plistPaths = append(plistPaths, struct {
-			path   string
-			system bool
-		}{filepath.Join(home, "Library", "LaunchAgents", "io.yaat.sidecar.plist"), false})
-	}
-
-	found := false
-	for _, plist := range plistPaths {
-		if _, err := os.Stat(plist.path); err != nil {
-			continue
-		}
-		found = true
-
-		// Try modern bootout first, then fallback to unload/remove.
-		if plist.system {
-			// System-level daemon
-			commands := [][]string{
-				{"launchctl", "bootout", "system", plist.path},
-				{"launchctl", "unload", plist.path},
-				{"launchctl", "remove", "io.yaat.sidecar"},
-			}
-			for _, cmd := range commands {
-				if _, lookErr := exec.LookPath(cmd[0]); lookErr != nil {
-					continue
-				}
-				exec.Command(cmd[0], cmd[1:]...).Run()
-			}
-		} else {
-			// User-level agent
-			uid := fmt.Sprintf("gui/%d", os.Getuid())
-			commands := [][]string{
-				{"launchctl", "bootout", uid, plist.path},
-				{"launchctl", "unload", plist.path},
-				{"launchctl", "remove", "io.yaat.sidecar"},
-			}
-			for _, cmd := range commands {
-				if _, lookErr := exec.LookPath(cmd[0]); lookErr != nil {
-					continue
-				}
-				exec.Command(cmd[0], cmd[1:]...).Run()
-			}
-		}
-
-		if err := os.Remove(plist.path); err != nil {
-			if os.IsPermission(err) {
-				warnings = append(warnings, fmt.Sprintf("remove %s: permission denied (try with sudo)", plist.path))
-			} else {
-				warnings = append(warnings, fmt.Sprintf("remove %s: %v", plist.path, err))
-			}
-		}
-	}
-
-	if !found {
-		fmt.Println("(not installed)")
-		return warnings
-	}
-
-	if len(warnings) > 0 {
-		fmt.Println("⚠️  Warning")
-	} else {
-		fmt.Println("✓")
-	}
-	return warnings
 }
 
 func removeSystemdUnits() []string {
@@ -615,7 +531,7 @@ func removeIfSymlinkTo(path, target string) (bool, error) {
 }
 
 func possiblePidFiles() []string {
-	paths := []string{pidFile}
+	paths := []string{"/var/run/yaat-sidecar.pid"}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		paths = append(paths, filepath.Join(home, ".yaat", "sidecar.pid"))
 	}
@@ -623,7 +539,7 @@ func possiblePidFiles() []string {
 }
 
 func possibleLogFiles() []string {
-	paths := []string{logFile}
+	paths := []string{"/var/log/yaat-sidecar.log", "/var/log/yaat/sidecar.log"}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		paths = append(paths, filepath.Join(home, ".yaat", "sidecar.log"))
 		paths = append(paths, filepath.Join(home, "Library", "Logs", "yaat-sidecar.log"))
@@ -650,7 +566,6 @@ func possibleConfigFiles() []string {
 
 	paths = append(paths,
 		"/etc/yaat/yaat.yaml",
-		"/usr/local/etc/yaat/yaat.yaml",
 	)
 
 	return paths
@@ -662,8 +577,6 @@ func possibleBinaryLinks() []string {
 		"/usr/local/bin/yaat-sidecar",
 		"/usr/bin/yaat-sidecar",
 		"/bin/yaat-sidecar",
-		"/opt/homebrew/bin/yaat-sidecar",
-		"/home/linuxbrew/.linuxbrew/bin/yaat-sidecar",
 	)
 
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
@@ -703,12 +616,6 @@ func possibleStateDirs() []string {
 	paths = append(paths,
 		"/var/lib/yaat",
 		"/var/log/yaat",
-	)
-
-	// macOS state directories
-	paths = append(paths,
-		"/usr/local/var/lib/yaat",
-		"/usr/local/var/log/yaat",
 	)
 
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
@@ -809,26 +716,22 @@ exit 0
 }
 
 // GetPidPath returns the path to the PID file
-func GetPidPath() string {
-	return getPidFilePath()
+func GetPidPath(expectedPath string) string {
+	return getPidFilePath(expectedPath)
 }
 
 // GetLogPath returns the actual log file path if it exists, empty string otherwise
-func GetLogPath() string {
-	// Check actual log file paths in priority order
-	possiblePaths := []string{
-		logFile, // /var/log/yaat/sidecar.log
+func GetLogPath(expectedPath string) string {
+	// Check expected path first
+	if _, err := os.Stat(expectedPath); err == nil {
+		return expectedPath
 	}
 
-	// Add user home path
+	// Check user home fallback
 	if home, err := os.UserHomeDir(); err == nil {
-		possiblePaths = append(possiblePaths, filepath.Join(home, ".yaat", "sidecar.log"))
-	}
-
-	// Return first path that exists
-	for _, path := range possiblePaths {
-		if _, err := os.Stat(path); err == nil {
-			return path
+		homePath := filepath.Join(home, ".yaat", "sidecar.log")
+		if _, err := os.Stat(homePath); err == nil {
+			return homePath
 		}
 	}
 
@@ -836,10 +739,11 @@ func GetLogPath() string {
 }
 
 // GetExpectedLogPath returns where logs will be written (even if file doesn't exist yet)
-func GetExpectedLogPath() string {
-	// Check if /var/log/yaat directory exists (writable)
-	if _, err := os.Stat(logDir); err == nil {
-		return logFile
+func GetExpectedLogPath(expectedPath string) string {
+	// Check if directory for expected path exists (writable)
+	dir := filepath.Dir(expectedPath)
+	if _, err := os.Stat(dir); err == nil {
+		return expectedPath
 	}
 
 	// Fallback to user home
@@ -847,7 +751,7 @@ func GetExpectedLogPath() string {
 		return filepath.Join(home, ".yaat", "sidecar.log")
 	}
 
-	return logFile // Last resort
+	return expectedPath // Last resort
 }
 
 // Helper functions
@@ -856,23 +760,25 @@ func writePidFile(path string, pid int) error {
 	return ioutil.WriteFile(path, []byte(strconv.Itoa(pid)), 0644)
 }
 
-func getPidFilePath() string {
-	if _, err := os.Stat(pidFile); err == nil {
-		return pidFile
+func getPidFilePath(expectedPath string) string {
+	// Check expected path first
+	if _, err := os.Stat(expectedPath); err == nil {
+		return expectedPath
 	}
+	// Check home directory fallback
 	home, _ := os.UserHomeDir()
 	if home == "" {
-		return pidFile
+		return expectedPath
 	}
 	userPid := filepath.Join(home, ".yaat", "sidecar.pid")
 	if _, err := os.Stat(userPid); err == nil {
 		return userPid
 	}
-	return userPid
+	return expectedPath
 }
 
-func readPID() (int, string, error) {
-	pidPath := getPidFilePath()
+func readPID(expectedPath string) (int, string, error) {
+	pidPath := getPidFilePath(expectedPath)
 
 	pidBytes, err := ioutil.ReadFile(pidPath)
 	if err != nil {

@@ -15,26 +15,30 @@ import (
 
 // Proxy is an HTTP reverse proxy that captures requests/responses
 type Proxy struct {
-	listenPort  int
-	upstreamURL *url.URL
-	serviceName string
-	environment string
-	buffer      *buffer.Buffer
+	listenPort     int
+	upstreamURL    *url.URL
+	organizationID string
+	serviceName    string
+	environment    string
+	globalTags     map[string]string
+	buffer         *buffer.Buffer
 }
 
 // New creates a new Proxy
-func New(listenPort int, upstreamURL, serviceName, environment string, buf *buffer.Buffer) (*Proxy, error) {
+func New(listenPort int, upstreamURL, organizationID, serviceName, environment string, globalTags map[string]string, buf *buffer.Buffer) (*Proxy, error) {
 	upstream, err := url.Parse(upstreamURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid upstream URL: %w", err)
 	}
 
 	return &Proxy{
-		listenPort:  listenPort,
-		upstreamURL: upstream,
-		serviceName: serviceName,
-		environment: environment,
-		buffer:      buf,
+		listenPort:     listenPort,
+		upstreamURL:    upstream,
+		organizationID: organizationID,
+		serviceName:    serviceName,
+		environment:    environment,
+		globalTags:     globalTags,
+		buffer:         buf,
 	}, nil
 }
 
@@ -112,22 +116,33 @@ func (p *Proxy) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Create span event
 	event := buffer.Event{
-		"service_name":   p.serviceName,
-		"event_id":       uuid.New().String(),
-		"timestamp":      startTime.UTC().Format(time.RFC3339),
-		"event_type":     "span",
-		"environment":    p.environment,
-		"trace_id":       traceID,
-		"span_id":        spanID,
-		"parent_span_id": "", // Root span from proxy
-		"operation":      fmt.Sprintf("%s %s", r.Method, r.URL.Path),
-		"duration_ms":    float64(duration.Milliseconds()),
-		"status_code":    resp.StatusCode,
+		"organization_id": p.organizationID,
+		"service_name":    p.serviceName,
+		"event_id":        uuid.New().String(),
+		"timestamp":       startTime.UTC().Format(time.RFC3339),
+		"event_type":      "span",
+		"environment":     p.environment,
+		"trace_id":        traceID,
+		"span_id":         spanID,
+		"parent_span_id":  "", // Root span from proxy
+		"operation":       fmt.Sprintf("%s %s", r.Method, r.URL.Path),
+		"duration_ms":     float64(duration.Milliseconds()),
+		"status_code":     resp.StatusCode,
 		"tags": map[string]string{
 			"method": r.Method,
 			"path":   r.URL.Path,
 			"host":   r.Host,
 		},
+	}
+
+	// Merge global tags with span-specific tags
+	if len(p.globalTags) > 0 {
+		eventTags := event["tags"].(map[string]string)
+		for k, v := range p.globalTags {
+			if _, exists := eventTags[k]; !exists {
+				eventTags[k] = v
+			}
+		}
 	}
 
 	// Add to buffer

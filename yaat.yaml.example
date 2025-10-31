@@ -1,6 +1,10 @@
 # YAAT Sidecar Configuration Example
 # Copy this file to yaat.yaml and configure for your environment
 
+# Your YAAT organization ID (required)
+# Get this from: https://yaat.io → Settings → Organization
+organization_id: "org_xxxxxxxxxxxxxxxxxxxxx"
+
 # Your YAAT organization API key (required)
 # Get this from your YAAT dashboard
 api_key: "yaat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"

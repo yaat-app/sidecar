@@ -24,19 +24,20 @@ var nginxLogRegex = regexp.MustCompile(`^(\S+) - - \[([^\]]+)\] "(\w+) ([^ ]+) H
 var apacheLogRegex = regexp.MustCompile(`^(\S+) - - \[([^\]]+)\] "(\w+) ([^ ]+) HTTP/[^"]+" (\d+) (\d+)(?: "([^"]*)" "([^"]*)")?`)
 
 // ParseDjangoLog parses a Django log line
-func ParseDjangoLog(line, serviceName, environment string) *buffer.Event {
+func ParseDjangoLog(line, organizationID, serviceName, environment string) *buffer.Event {
 	matches := djangoLogRegex.FindStringSubmatch(line)
 	if matches == nil {
 		// If it doesn't match, treat as generic log
 		return &buffer.Event{
-			"service_name": serviceName,
-			"event_id":     uuid.New().String(),
-			"timestamp":    time.Now().UTC().Format(time.RFC3339),
-			"event_type":   "log",
-			"environment":  environment,
-			"level":        "info",
-			"message":      line,
-			"stacktrace":   "",
+			"organization_id": organizationID,
+			"service_name":    serviceName,
+			"event_id":        uuid.New().String(),
+			"timestamp":       time.Now().UTC().Format(time.RFC3339),
+			"event_type":      "log",
+			"environment":     environment,
+			"level":           "info",
+			"message":         line,
+			"stacktrace":      "",
 		}
 	}
 
@@ -56,14 +57,15 @@ func ParseDjangoLog(line, serviceName, environment string) *buffer.Event {
 	logLevel := mapLogLevel(level)
 
 	return &buffer.Event{
-		"service_name": serviceName,
-		"event_id":     uuid.New().String(),
-		"timestamp":    t.UTC().Format(time.RFC3339),
-		"event_type":   "log",
-		"environment":  environment,
-		"level":        logLevel,
-		"message":      message,
-		"stacktrace":   "",
+		"organization_id": organizationID,
+		"service_name":    serviceName,
+		"event_id":        uuid.New().String(),
+		"timestamp":       t.UTC().Format(time.RFC3339),
+		"event_type":      "log",
+		"environment":     environment,
+		"level":           logLevel,
+		"message":         message,
+		"stacktrace":      "",
 		"tags": map[string]string{
 			"logger": logger,
 		},
@@ -71,7 +73,7 @@ func ParseDjangoLog(line, serviceName, environment string) *buffer.Event {
 }
 
 // ParseNginxLog parses an Nginx access log line
-func ParseNginxLog(line, serviceName, environment string) *buffer.Event {
+func ParseNginxLog(line, organizationID, serviceName, environment string) *buffer.Event {
 	matches := nginxLogRegex.FindStringSubmatch(line)
 	if matches == nil {
 		return nil
@@ -120,24 +122,25 @@ func ParseNginxLog(line, serviceName, environment string) *buffer.Event {
 
 	// Create span event for HTTP request
 	return &buffer.Event{
-		"service_name":   serviceName,
-		"event_id":       uuid.New().String(),
-		"timestamp":      parsedTime.UTC().Format(time.RFC3339),
-		"event_type":     "span",
-		"environment":    environment,
-		"trace_id":       uuid.New().String(),
-		"span_id":        uuid.New().String(),
-		"parent_span_id": "", // Not available from access logs
-		"operation":      method + " " + path,
-		"duration_ms":    0.0, // Not available from access logs
-		"status_code":    status,
-		"tags":           tags,
-		"metric_value":   float64(size),
+		"organization_id": organizationID,
+		"service_name":    serviceName,
+		"event_id":        uuid.New().String(),
+		"timestamp":       parsedTime.UTC().Format(time.RFC3339),
+		"event_type":      "span",
+		"environment":     environment,
+		"trace_id":        uuid.New().String(),
+		"span_id":         uuid.New().String(),
+		"parent_span_id":  "", // Not available from access logs
+		"operation":       method + " " + path,
+		"duration_ms":     0.0, // Not available from access logs
+		"status_code":     status,
+		"tags":            tags,
+		"metric_value":    float64(size),
 	}
 }
 
 // ParseApacheLog parses an Apache access log line (Common/Combined format)
-func ParseApacheLog(line, serviceName, environment string) *buffer.Event {
+func ParseApacheLog(line, organizationID, serviceName, environment string) *buffer.Event {
 	// Apache format is very similar to Nginx, use same regex
 	matches := apacheLogRegex.FindStringSubmatch(line)
 	if matches == nil {
@@ -189,24 +192,25 @@ func ParseApacheLog(line, serviceName, environment string) *buffer.Event {
 	}
 
 	return &buffer.Event{
-		"service_name":   serviceName,
-		"event_id":       uuid.New().String(),
-		"timestamp":      parsedTime.UTC().Format(time.RFC3339),
-		"event_type":     "span",
-		"environment":    environment,
-		"trace_id":       uuid.New().String(),
-		"span_id":        uuid.New().String(),
-		"parent_span_id": "",
-		"operation":      method + " " + path,
-		"duration_ms":    0.0,
-		"status_code":    status,
-		"tags":           tags,
-		"metric_value":   float64(size),
+		"organization_id": organizationID,
+		"service_name":    serviceName,
+		"event_id":        uuid.New().String(),
+		"timestamp":       parsedTime.UTC().Format(time.RFC3339),
+		"event_type":      "span",
+		"environment":     environment,
+		"trace_id":        uuid.New().String(),
+		"span_id":         uuid.New().String(),
+		"parent_span_id":  "",
+		"operation":       method + " " + path,
+		"duration_ms":     0.0,
+		"status_code":     status,
+		"tags":            tags,
+		"metric_value":    float64(size),
 	}
 }
 
 // ParseDockerLog parses Docker/container runtime JSON log envelope lines.
-func ParseDockerLog(line, serviceName, environment string) *buffer.Event {
+func ParseDockerLog(line, organizationID, serviceName, environment string) *buffer.Event {
 	type dockerEnvelope struct {
 		Log       string `json:"log"`
 		Stream    string `json:"stream"`
@@ -219,7 +223,7 @@ func ParseDockerLog(line, serviceName, environment string) *buffer.Event {
 	var env dockerEnvelope
 	if err := json.Unmarshal([]byte(line), &env); err != nil {
 		// Fall back to generic JSON parser; the payload might already be application JSON.
-		return ParseJSONLog(line, serviceName, environment)
+		return ParseJSONLog(line, organizationID, serviceName, environment)
 	}
 
 	message := strings.TrimRight(env.Log, "\r\n")
@@ -249,7 +253,7 @@ func ParseDockerLog(line, serviceName, environment string) *buffer.Event {
 
 	trimmed := strings.TrimSpace(message)
 	if len(trimmed) > 0 && trimmed[0] == '{' {
-		if inner := ParseJSONLog(trimmed, serviceName, environment); inner != nil {
+		if inner := ParseJSONLog(trimmed, organizationID, serviceName, environment); inner != nil {
 			(*inner)["timestamp"] = timestamp.Format(time.RFC3339Nano)
 			(*inner)["event_id"] = uuid.New().String()
 			tags := map[string]string{
@@ -283,13 +287,14 @@ func ParseDockerLog(line, serviceName, environment string) *buffer.Event {
 	}
 
 	event := buffer.Event{
-		"service_name": serviceName,
-		"event_id":     uuid.New().String(),
-		"timestamp":    timestamp.Format(time.RFC3339Nano),
-		"event_type":   "log",
-		"environment":  environment,
-		"level":        level,
-		"message":      message,
+		"organization_id": organizationID,
+		"service_name":    serviceName,
+		"event_id":        uuid.New().String(),
+		"timestamp":       timestamp.Format(time.RFC3339Nano),
+		"event_type":      "log",
+		"environment":     environment,
+		"level":           level,
+		"message":         message,
 	}
 
 	tags := map[string]string{
@@ -310,20 +315,21 @@ func ParseDockerLog(line, serviceName, environment string) *buffer.Event {
 }
 
 // ParseJSONLog parses a JSON log line
-func ParseJSONLog(line, serviceName, environment string) *buffer.Event {
+func ParseJSONLog(line, organizationID, serviceName, environment string) *buffer.Event {
 	// Try to parse as JSON
 	var logData map[string]interface{}
 	if err := json.Unmarshal([]byte(line), &logData); err != nil {
 		// Not valid JSON, treat as generic log
 		return &buffer.Event{
-			"service_name": serviceName,
-			"event_id":     uuid.New().String(),
-			"timestamp":    time.Now().UTC().Format(time.RFC3339),
-			"event_type":   "log",
-			"environment":  environment,
-			"level":        "info",
-			"message":      line,
-			"stacktrace":   "",
+			"organization_id": organizationID,
+			"service_name":    serviceName,
+			"event_id":        uuid.New().String(),
+			"timestamp":       time.Now().UTC().Format(time.RFC3339),
+			"event_type":      "log",
+			"environment":     environment,
+			"level":           "info",
+			"message":         line,
+			"stacktrace":      "",
 		}
 	}
 
@@ -406,14 +412,15 @@ func ParseJSONLog(line, serviceName, environment string) *buffer.Event {
 	}
 
 	event := &buffer.Event{
-		"service_name": serviceName,
-		"event_id":     uuid.New().String(),
-		"timestamp":    timestamp,
-		"event_type":   "log",
-		"environment":  environment,
-		"level":        level,
-		"message":      message,
-		"stacktrace":   stacktrace,
+		"organization_id": organizationID,
+		"service_name":    serviceName,
+		"event_id":        uuid.New().String(),
+		"timestamp":       timestamp,
+		"event_type":      "log",
+		"environment":     environment,
+		"level":           level,
+		"message":         message,
+		"stacktrace":      stacktrace,
 	}
 
 	// Add tags if any
@@ -444,29 +451,30 @@ func mapLogLevel(level string) string {
 }
 
 // ParseLog parses a log line based on format
-func ParseLog(line, format, serviceName, environment string) *buffer.Event {
+func ParseLog(line, format, organizationID, serviceName, environment string) *buffer.Event {
 	switch format {
 	case "django":
-		return ParseDjangoLog(line, serviceName, environment)
+		return ParseDjangoLog(line, organizationID, serviceName, environment)
 	case "nginx":
-		return ParseNginxLog(line, serviceName, environment)
+		return ParseNginxLog(line, organizationID, serviceName, environment)
 	case "apache":
-		return ParseApacheLog(line, serviceName, environment)
+		return ParseApacheLog(line, organizationID, serviceName, environment)
 	case "json":
-		return ParseJSONLog(line, serviceName, environment)
+		return ParseJSONLog(line, organizationID, serviceName, environment)
 	case "docker":
-		return ParseDockerLog(line, serviceName, environment)
+		return ParseDockerLog(line, organizationID, serviceName, environment)
 	default:
 		// Generic log
 		return &buffer.Event{
-			"service_name": serviceName,
-			"event_id":     uuid.New().String(),
-			"timestamp":    time.Now().UTC().Format(time.RFC3339),
-			"event_type":   "log",
-			"environment":  environment,
-			"level":        "info",
-			"message":      line,
-			"stacktrace":   "",
+			"organization_id": organizationID,
+			"service_name":    serviceName,
+			"event_id":        uuid.New().String(),
+			"timestamp":       time.Now().UTC().Format(time.RFC3339),
+			"event_type":      "log",
+			"environment":     environment,
+			"level":           "info",
+			"message":         line,
+			"stacktrace":      "",
 		}
 	}
 }
