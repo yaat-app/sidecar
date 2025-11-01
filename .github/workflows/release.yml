@@ -51,7 +51,7 @@ jobs:
 
       - name: Install build dependencies (CGO + DuckDB)
         if: ${{ matrix.requires_cgo == true }}
-        run: sudo apt-get update && sudo apt-get install -y build-essential gcc-aarch64-linux-gnu libsystemd-dev
+        run: sudo apt-get update && sudo apt-get install -y build-essential gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libsystemd-dev
 
       - name: Set up Go
         uses: actions/setup-go@v5

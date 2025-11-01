@@ -39,12 +39,20 @@ Files are saved with `0600` permission. Example scaffold: `yaat.yaml.example`.
 ### 2.2 Config Schema (`internal/config.Config`)
 
 ```yaml
-api_key:        (string, required)
+api_key:        (string, optional - required for cloud mode)
+organization_id:(string, optional - required for cloud mode)
 service_name:   (string, required)
 environment:    (string, defaults to production)
 buffer_size:    (int, default 1000 events)
 flush_interval: (duration string, default 10s)
 api_endpoint:   (string, defaults to https://yaat.io/api/v1/ingest)
+analytics:
+  enabled:          (bool, default true)
+  database_path:    (string, default /var/lib/yaat/analytics.db)
+  retention_days:   (int, default 14)
+  max_size_gb:      (float, default 2.0)
+  batch_size:       (int, default 100)
+  write_timeout:    (duration string, default 5s)
 delivery:
   batch_size:     (int, default 500)
   compress:       (bool, default false unless explicitly enabled)
@@ -83,20 +91,20 @@ The TUI setup wizard (`internal/tui/setup.go`) mirrors the same behaviour with k
 
 ### 3.1 Daemonisation (`internal/daemon`)
 
-- **Start:** re-executes the sidecar binary with `--log-file` option; detaches via `Setsid` and writes PID files (`/var/run/yaat-sidecar.pid` or `~/.yaat/sidecar.pid`). Logs default to `/var/log/yaat/sidecar.log` with a user home fallback.  
-- **Stop:** reads PID file, sends SIGTERM, removes PID file.  
-- **IsRunning:** checks PID file existence and verifies the process is alive with signal `0`.  
-- **GetLogPath / GetExpectedLogPath:** utility functions for TUI status messages.  
-- **Uninstall:** comprehensive cleanup – stops processes, removes launchd/systemd units, deletes PID/log/config files (including fallback paths), schedules binary removal if required, and reports warnings requiring sudo.
+- **Start:** re-executes the sidecar binary with `--log-file` option; detaches via `Setsid` and writes PID files (`/var/run/yaat-sidecar.pid` or `~/.yaat/sidecar.pid`). Logs default to `/var/log/yaat/sidecar.log` with a user home fallback.
+- **Stop:** reads PID file, sends SIGTERM, removes PID file.
+- **IsRunning:** checks PID file existence and verifies the process is alive with signal `0`.
+- **GetLogPath / GetExpectedLogPath:** utility functions for TUI status messages.
+- **Uninstall:** comprehensive cleanup – stops processes, removes systemd units (Linux-only), deletes PID/log/config files, schedules binary removal if required, and reports warnings requiring sudo.
 
 ### 3.2 Uninstall Safety Improvements
 
 The new uninstall flow:
 
-- Calls `Stop` plus `pkill`/`killall` as backup.  
-- Handles user/system launch agents and systemd units (user + system scope).  
-- Cleans PID/log/config directories and symlinked binaries in common locations.  
-- Warns when sudo is necessary (binary owned by root).  
+- Calls `Stop` plus `pkill` as backup.
+- Handles systemd units (user + system scope) on Linux.
+- Cleans PID/log/config directories (`/var/lib/yaat`, `/var/log/yaat`, `/etc/yaat`).
+- Warns when sudo is necessary (binary owned by root).
 - Leaves a clear summary of any warnings so CI or operators can react.
 
 ---
@@ -124,9 +132,18 @@ The new uninstall flow:
            └────┬───────┘
                 │ flush timer / capacity
                 ▼
-         ┌────────────────┐
-         │ Forwarder      │ (internal/forwarder)
-         └────────────────┘
+         ┌──────────────────┐
+         │  Dual-Write      │
+         │                  │
+         │  ┌────────────┐  │
+         │  │ Analytics  │──┼──► DuckDB (local storage)
+         │  │  Writer    │  │
+         │  └────────────┘  │
+         │                  │
+         │  ┌────────────┐  │
+         │  │ Forwarder  │──┼──► YAAT API (cloud, optional)
+         │  └────────────┘  │
+         └──────────────────┘
 ```
 
 ### 4.1 Tailers (`internal/logs/tailer.go`)
@@ -159,14 +176,67 @@ All events are created as `buffer.Event` (`map[string]interface{}`) and include 
 
 `cmd/main.go` launches `periodicFlusher` goroutine with a ticker using `flush_interval`. Every tick:
 
-1. Drains the disk-backed queue (`internal/queue`) first, attempting delivery for each persisted batch. Failed batches are parked in a dead-letter directory for manual replay.  
-2. Calls `buf.Flush()` and tries to deliver the in-memory batch. On failure, the payload is enqueued to disk and metrics reflect the backlog.  
-3. Runs retention cleanup using `delivery.queue_retention` and `delivery.dead_letter_retention`.  
+1. Drains the disk-backed queue (`internal/queue`) first, attempting delivery for each persisted batch. Failed batches are parked in a dead-letter directory for manual replay.
+2. Calls `buf.Flush()` and performs **dual-write**:
+   - **Analytics Write (async, non-blocking):** Sends events to DuckDB via `internal/analytics.Writer`. Failures are logged but don't block cloud delivery.
+   - **Cloud Forwarding (conditional):** If `api_key` is set, sends to YAAT API. If empty, runs in **local-only mode** (100% offline).
+3. Runs retention cleanup using `delivery.queue_retention` and `delivery.dead_letter_retention`.
 4. Logs successful/failed attempts and updates diagnostics.
 
 On shutdown (SIGINT/SIGTERM) the process flushes any remaining events synchronously, enqueuing to disk if delivery fails.
 
-### 4.5 Host Metrics Collector (`internal/metrics`)
+### 4.5 DuckDB Local Analytics (`internal/analytics`)
+
+**KILLER FEATURE:** Embedded columnar SQL database for local event storage and querying.
+
+#### 4.5.1 Operational Modes
+
+1. **Cloud + Local Mode (api_key set):**
+   - Events written to both DuckDB and YAAT API
+   - Query locally with SQL while cloud dashboard shows same data
+   - Best of both worlds: offline analysis + cloud platform features
+
+2. **Local-Only Mode (api_key empty):**
+   - 100% offline operation, zero cloud dependency
+   - Perfect for air-gapped environments, compliance requirements, or trial usage
+   - Organization ID automatically set to "local"
+
+#### 4.5.2 Architecture (`internal/analytics/`)
+
+- **`schema.go`:** DuckDB table schema matching ClickHouse exactly (tags stored as JSON VARCHAR)
+- **`writer.go`:** Async batch writer with buffered channel (queue size 1000)
+  - Single-writer pattern (SetMaxOpenConns=1)
+  - Non-blocking writes prevent analytics failures from impacting cloud delivery
+  - Prepared statements for efficient batch inserts
+- **`retention.go`:** Automatic cleanup enforcing `retention_days` and `max_size_gb`
+  - Runs daily via ticker
+  - Aggressive oldest-first deletion when size limits exceeded
+  - Dead-letter batches for failed writes
+
+#### 4.5.3 Schema Alignment
+
+DuckDB schema replicates backend ClickHouse for query consistency:
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `organization_id` | VARCHAR | "local" in offline mode |
+| `service_name`, `environment` | VARCHAR | From config |
+| `event_id` | VARCHAR (PK) | UUID |
+| `timestamp`, `received_at` | TIMESTAMP WITH TIME ZONE | RFC3339 |
+| `event_type` | VARCHAR | log, span, metric |
+| `level` | VARCHAR | debug → critical |
+| `message`, `stacktrace`, `operation` | VARCHAR | Nullable |
+| `trace_id`, `span_id`, `parent_span_id` | VARCHAR | Nullable |
+| `duration_ms`, `metric_value` | DOUBLE | Nullable |
+| `status_code` | USMALLINT | Nullable |
+| `metric_name` | VARCHAR | Nullable |
+| `tags` | VARCHAR (JSON) | map[string]string serialized |
+
+**Why JSON VARCHAR for tags?** DuckDB Go driver cannot bind map[string]string to MAP columns in prepared statements. JSON serialization provides same query flexibility.
+
+### 4.6 Host Metrics Collector (`internal/metrics`)
+
+### 4.7 Host Metrics Collector (`internal/metrics`)
 
 - Optional subsystem enabled via `metrics.enabled` that samples host-level telemetry (CPU, memory, disk, network) at `metrics.interval` (default 30s).
 - On Linux the collector reads `/proc/stat`, `/proc/meminfo`, `statfs`, and `/proc/net/dev`; other platforms log a graceful warning and skip sampling.
@@ -175,20 +245,20 @@ On shutdown (SIGINT/SIGTERM) the process flushes any remaining events synchronou
 - The collector runs in its own goroutine, stops during shutdown, and shares the same diagnostics instrumentation (throughput, queue depth).
 - `metrics.statsd.*` can reuse the same tag set, letting host + StatsD metrics share metadata.
 
-### 4.6 StatsD/DogStatsD Listener (`internal/statsd`)
+### 4.8 StatsD/DogStatsD Listener (`internal/statsd`)
 
 - Controlled by `metrics.statsd.*`; when enabled the agent listens on UDP (default `:8125`) and parses standard StatsD + DogStatsD tags.
 - Metrics are normalised into metric events (respecting namespace, tags, sample rates) and inherit `metrics.tags` plus packet-level tags.
 - Compatible with apps emitting StatsD counters, gauges, timers, histograms, and sets; counters honour sample rates by adjusting values before enqueue.
 - Diagnostics/TUI show queue impact; `/metrics` reflects the combined throughput.
 
-### 4.7 Journald Streaming (`internal/logs/journald`)
+### 4.9 Journald Streaming (`internal/logs/journald`)
 
 - Linux + cgo builds can set `format: "journald"` on a log entry to stream from systemd-journald; the optional `path` acts as `_SYSTEMD_UNIT` filter.
 - Entries are mapped to YAAT log events with priority → level mapping and useful metadata exposed as tags (unit, transport, hostname, identifier, PID, etc.).
 - Stubbed on other platforms (no-op with warning) so configuration remains portable.
 
-### 4.8 Sensitive Data Scrubbing (`internal/scrubber`)
+### 4.10 Sensitive Data Scrubbing (`internal/scrubber`)
 
 - Runs before buffering to ensure redaction policies are applied consistently across logs, metrics, spans, journald, StatsD, and proxy events.
 - Rules support top-level fields (`message`, `stacktrace`, `operation`, etc.) and tag selectors (`tags.api_key`, `tags.*`).
@@ -314,11 +384,10 @@ Not deeply changed in this iteration, but for completeness:
 
 ## 10. Installers & Service Packaging
 
-- **`install.sh`** – cross-platform bootstrapper that installs the binary, sets up config/log/state directories, and optionally registers system services. The script detects Linux vs macOS and can run non-interactively via `YAAT_NONINTERACTIVE=1`.
+- **`install.sh`** – Linux-only bootstrapper that installs the binary, sets up config/log/state directories, and optionally registers systemd service. Can run non-interactively via `YAAT_NONINTERACTIVE=1`.
 - **Linux (systemd):** creates a `yaat` system user, provisions `/etc/yaat`, `/var/lib/yaat`, `/var/log/yaat`, installs `/etc/systemd/system/yaat-sidecar.service`, and offers to enable it. Operators run `sudo -u yaat yaat-sidecar --setup --config /etc/yaat/yaat.yaml` before starting the service.
-- **macOS (launchd):** provisions `/usr/local/etc/yaat`, `/usr/local/var/lib/yaat`, `/usr/local/var/log/yaat`, installs `/Library/LaunchDaemons/io.yaat.sidecar.plist`, and can load it immediately. Setup runs via `sudo yaat-sidecar --setup --config /usr/local/etc/yaat/yaat.yaml`.
 - **Service hardening:** systemd unit enables `NoNewPrivileges`, `ProtectSystem=strict`, and binds writable paths to the minimal directories the agent needs.
-- **Docs & README** now point Django users and operators to the new installer workflow and exact file locations.
+- **Platform focus:** Production deployments target Linux servers (amd64 + arm64). For development/testing on other platforms, build from source with `go build ./cmd`.
 
 ## 11. Testing & Local Execution Checklist
 
@@ -358,6 +427,7 @@ Not deeply changed in this iteration, but for completeness:
 | `internal/daemon` | Background service control + uninstall logic. |
 | `internal/selfupdate` | Release checks and binary replacement (not modified here). |
 | `internal/state` | Persistent metadata for TUI/CLI insight. |
+| `internal/analytics` | DuckDB local storage, schema, writer, retention cleanup. |
 
 ---
 

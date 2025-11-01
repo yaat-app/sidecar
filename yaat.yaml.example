@@ -1,12 +1,14 @@
 # YAAT Sidecar Configuration Example
 # Copy this file to yaat.yaml and configure for your environment
 
-# Your YAAT organization ID (required)
+# Your YAAT organization ID (optional - required only for cloud mode)
 # Get this from: https://yaat.io → Settings → Organization
+# Leave empty for local-only mode (offline analytics)
 organization_id: "org_xxxxxxxxxxxxxxxxxxxxx"
 
-# Your YAAT organization API key (required)
+# Your YAAT organization API key (optional - required only for cloud mode)
 # Get this from your YAAT dashboard
+# Leave empty for local-only mode (100% offline with DuckDB analytics)
 api_key: "yaat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 # Service name (required)
@@ -80,7 +82,20 @@ metrics:
     namespace: ""
     tags: {}
 
-# YAAT API endpoint (required)
+# Local Analytics (DuckDB embedded database)
+# KILLER FEATURE: Store and query events locally with SQL
+# Two modes:
+#   1. Cloud + Local: api_key set → dual-write to cloud API + local DB
+#   2. Local-Only: api_key empty → 100% offline, no cloud dependency
+analytics:
+  enabled: true
+  database_path: "/var/lib/yaat/analytics.db"  # Linux default
+  retention_days: 14  # Automatic cleanup after 14 days
+  max_size_gb: 2.0  # Max database size (aggressive cleanup when exceeded)
+  batch_size: 100  # Events per write batch
+  write_timeout: "5s"  # Timeout for database writes
+
+# YAAT API endpoint (optional - only used when api_key is set)
 # Production: https://yaat.io/api/v1/ingest
 # Staging: https://staging.yaat.io/api/v1/ingest
 # Development: http://localhost:8000/api/v1/ingest

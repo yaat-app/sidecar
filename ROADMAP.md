@@ -56,62 +56,77 @@ This roadmap converts the high-level vision into actionable engineering work. It
 
 ---
 
-## Phase 2 – Telemetry Breadth
+## Phase 2 – Telemetry Breadth ✅ (v0.0.11-alpha)
 
 ### Objectives
 - Capture logs, metrics, and traces at parity with common observability stacks.
+- **KILLER FEATURE:** Local analytics with DuckDB for offline SQL queries
 
-### Workstreams
+### Completed Workstreams ✅
 1. **Log Intake**
-   - Autodetect JSON/logfmt, journald support, Windows Event Log reader, docker stdout tailer.
-   - Regex-based redaction/scrubbing rules.
+   - ✅ Autodetect JSON/logfmt, journald support (Linux), docker stdout tailer
+   - ✅ Regex-based redaction/scrubbing rules
 
 2. **Host Metrics**
-   - Cross-platform collectors for CPU, memory, disk, network, process stats.
-   - Configurable sampling interval and metric filters.
+   - ✅ Linux collectors for CPU, memory, disk, network, process stats
+   - ✅ Configurable sampling interval and metric filters
 
 3. **Metrics API**
-   - StatsD/dogstatsd listener with counters, gauges, sets, histograms.
-   - Aggregation window, flush cadence, and tagging support.
+   - ✅ StatsD/dogstatsd listener with counters, gauges, sets, histograms
+   - ✅ Aggregation window, flush cadence, and tagging support
 
-4. **Tracing**
-   - OpenTelemetry receiver (OTLP/HTTP + gRPC).
-   - Span sampling policies, propagation helpers (W3C, B3).
+4. **Local Analytics (DuckDB)**
+   - ✅ Embedded columnar SQL database (`internal/analytics`)
+   - ✅ Two modes: Cloud + Local (dual-write) vs Local-Only (100% offline)
+   - ✅ Schema matching ClickHouse for query consistency
+   - ✅ Automatic retention and size-based cleanup
+   - ✅ Async non-blocking writes with prepared statements
+
+### Future Work
+- **Tracing:** OpenTelemetry receiver (OTLP/HTTP + gRPC), span sampling policies, propagation helpers (W3C, B3)
 
 ### Acceptance Criteria
-- Agent publishes host metrics and StatsD events to YAAT backend with accurate tags.
-- Traces ingested via OTLP appear in backend with correct relationships.
-- Scrubbing rules configurable in TUI/CLI and applied before send.
+- ✅ Agent publishes host metrics and StatsD events to YAAT backend with accurate tags
+- ✅ Scrubbing rules configurable in TUI/CLI and applied before send
+- ✅ Local analytics queryable with SQL, no cloud dependency required
+- 🔄 Traces ingested via OTLP appear in backend with correct relationships (pending)
 
 ---
 
-## Phase 3 – Platform & Packaging
+## Phase 3 – Platform & Packaging (Linux-Focused)
 
 ### Objectives
-- Make deployment frictionless across OSes, containers, and clusters.
+- Make deployment frictionless on Linux servers and containers (99% of production deployments)
 
 ### Workstreams
-1. **OS Packaging**
-   - Windows service support, systemd unit, launchd plist automation.
-   - Signed installers/binaries.
+1. **Linux Packaging** ✅
+   - ✅ systemd unit with hardening (NoNewPrivileges, ProtectSystem)
+   - ✅ Automated installer (`install.sh`)
+   - 🔄 Signed binaries for releases (pending)
 
 2. **Containers & Kubernetes**
-   - Build & publish Docker image (multi-arch).
-   - Helm chart with autodiscovery (annotations/labels).
-   - Sidecar/instrumentation examples for popular stacks (Nginx, Django, Node).
+   - 🔄 Build & publish Docker image (multi-arch: amd64, arm64)
+   - 🔄 Helm chart with autodiscovery (annotations/labels)
+   - 🔄 Sidecar/instrumentation examples for popular stacks (Nginx, Django, Node)
 
-3. **Autodiscovery Framework**
-   - Config template loader keyed by service type.
-   - Live reload when config files change.
+3. **Autodiscovery Framework** ✅
+   - ✅ Auto-detect services (Nginx, Apache, Django, containers)
+   - ✅ Docker/Kubernetes stdout detection
+   - 🔄 Live reload when config files change
 
 4. **Remote Config & Fleet Telemetry**
-   - Backend endpoints for agent status, version, queue metrics.
-   - Agent polls for remote config overrides (with signatures).
+   - 🔄 Backend endpoints for agent status, version, queue metrics
+   - 🔄 Agent polls for remote config overrides (with signatures)
+
+### Platform Notes
+- **Primary target:** Linux servers (amd64 + arm64)
+- **Development only:** macOS, Windows (build from source)
+- **Why Linux-only?** 99% of production servers run Linux; focusing here reduces complexity and maintenance burden
 
 ### Acceptance Criteria
-- One-command install for Linux/macOS, MSI for Windows.
-- Helm chart installs agent with autodiscovery; metrics/logs flow within 5 minutes.
-- Fleet dashboard in backend shows agent health.
+- ✅ One-command install for Linux with systemd integration
+- 🔄 Helm chart installs agent with autodiscovery; metrics/logs flow within 5 minutes
+- 🔄 Fleet dashboard in backend shows agent health
 
 ---
 
